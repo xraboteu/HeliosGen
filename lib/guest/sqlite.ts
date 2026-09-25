@@ -28,6 +28,17 @@ export function db(): DatabaseSync {
   return _db;
 }
 
+function tableColumns(d: DatabaseSync, table: string): Set<string> {
+  const rows = d.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return new Set(rows.map((r) => r.name));
+}
+
+function ensureColumn(d: DatabaseSync, table: string, column: string, ddl: string): void {
+  if (!tableColumns(d, table).has(column)) {
+    d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 function createSchema(d: DatabaseSync): void {
   d.exec(`
     CREATE TABLE IF NOT EXISTS generations (
@@ -72,7 +83,31 @@ function createSchema(d: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS spaces (
       id TEXT PRIMARY KEY, name TEXT, data TEXT, updated_at INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS provider_jobs (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      task_kind TEXT,
+      external_id TEXT,
+      status TEXT NOT NULL,
+      error_code TEXT,
+      error_message TEXT,
+      request_json TEXT,
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_provider_jobs_status
+      ON provider_jobs (status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_provider_jobs_external
+      ON provider_jobs (external_id);
   `);
+
+  // Non-destructive upgrades for DBs created before local providers.
+  ensureColumn(d, "generations", "provider", "provider TEXT");
+  ensureColumn(d, "generations", "external_id", "external_id TEXT");
+  ensureColumn(d, "generations", "task_kind", "task_kind TEXT");
 }
 
 // ── one-time JSON import ────────────────────────────────────────────────────

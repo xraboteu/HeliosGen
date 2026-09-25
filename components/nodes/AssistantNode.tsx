@@ -7,13 +7,9 @@ import { useAnimatedPopup } from "@/lib/useAnimatedPopup";
 import CornerResizer from "./CornerResizer";
 import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation";
 import { useReadOnly } from "@/lib/readOnlyContext";
+import { useOllamaChatModels } from "@/lib/useOllamaChatModels";
 
 type AssistantNodeType = Node<NodeData, "assistantNode">;
-
-const MODELS = [
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
-];
 
 export default function AssistantNode({ id, data, selected }: NodeProps<AssistantNodeType>) {
   const readOnly = useReadOnly();
@@ -23,6 +19,9 @@ export default function AssistantNode({ id, data, selected }: NodeProps<Assistan
   const insertEdge = useWorkflowStore((s) => s.insertEdge);
   const edges = useWorkflowStore((s) => s.edges);
   const kieKeySet = useWorkflowStore((s) => s.kieKeySet);
+  const ollamaChat = useOllamaChatModels();
+  const MODELS = ollamaChat.models.map((m) => ({ id: m.id, label: m.label }));
+  const pickerDisabled = ollamaChat.available === false || ollamaChat.empty;
 
   const cardRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -47,7 +46,7 @@ export default function AssistantNode({ id, data, selected }: NodeProps<Assistan
   const status = (data.status as string) ?? "idle";
   const outputText = (data.outputText as string) ?? "";
   const localPrompt = (data.localPrompt as string) ?? "";
-  const model = (data.model as string) ?? "claude-sonnet-4-6";
+  const model = (data.model as string) || MODELS[0]?.id || "";
 
   const [viewMode, setViewMode] = useState<"input" | "output">("input");
   const [loading, setLoading] = useState(false);

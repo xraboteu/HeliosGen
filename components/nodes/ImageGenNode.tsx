@@ -7,9 +7,7 @@ import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation
 type ImageGenNodeType = Node<NodeData, "imageGenNode">;
 
 const IMAGE_MODELS = [
-  { value: "flux-schnell", label: "Flux Schnell (fast)" },
-  { value: "flux-dev", label: "Flux Dev (quality)" },
-  { value: "sdxl", label: "Stable Diffusion XL" },
+  { value: "", label: "ComfyUI image profile" },
 ];
 
 const STATUS_RING: Record<string, string> = {

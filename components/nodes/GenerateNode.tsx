@@ -15,30 +15,40 @@ import { browserNotify, requestNotificationPermission } from "@/lib/browserNotif
 type GenerateNodeType = Node<NodeData, "generateNode">;
 
 import { ShieldBan } from "lucide-react";
-import { IMAGE_MODELS, AZURE_POPULAR_SIZES, validateAzureCustomSize } from "@/lib/modelConfig";
-import { PROVIDERS, ProviderId, getModelProvider, setModelProvider, modelHasProviderChoice } from "@/lib/providers";
+import type { ImageModel } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
+// Local ComfyUI only — model id selects a profile; generation uses profileId.
 import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation";
 import MissingInputWarning from "./MissingInputWarning";
 
-// Derived from config — no hardcoding needed
-const MODELS = IMAGE_MODELS.map((m) => ({ id: m.id, name: m.name, meta: m.provider }));
-const MODEL_CAPS = Object.fromEntries(
-  IMAGE_MODELS.map((m) => [m.id, {
+const DEFAULT_CAPS = {
+  supportsImages: false,
+  supportsQuality: false,
+  ratios: ["1:1", "16:9", "9:16", "4:3", "3:4"],
+  maxImages: 0,
+  qualityOptions: undefined as string[] | undefined,
+  qualityKey: undefined as string | undefined,
+  azureQualityOptions: undefined as string[] | undefined,
+  azureResolutionOptions: undefined as string[] | undefined,
+};
+
+function capsFromModel(m: ImageModel | undefined) {
+  if (!m) return DEFAULT_CAPS;
+  return {
     supportsImages: m.supportsImages,
-    supportsQuality: m.supportsQuality,
+    supportsQuality: false,
     ratios: m.ratios,
     maxImages: m.maxImages,
-    qualityOptions: m.apiInput.qualityOptions,
-    qualityKey: m.apiInput.qualityKey,
-    azureQualityOptions: m.azureQualityOptions,
-    azureResolutionOptions: m.azureResolutionOptions,
-  }])
-);
-const DEFAULT_CAPS = MODEL_CAPS["nano-banana-2"];
+    qualityOptions: undefined as string[] | undefined,
+    qualityKey: undefined as string | undefined,
+    azureQualityOptions: undefined as string[] | undefined,
+    azureResolutionOptions: undefined as string[] | undefined,
+  };
+}
 
 // ── Aspect ratios ─────────────────────────────────────────────────────────────
 
-// (each model defines its own subset — see MODEL_CAPS above)
+// (each model defines its own subset via capsFromModel)
 
 function ratioRect(value: string) {
   // "auto" doesn't have a fixed ratio — render as a square preview
@@ -162,7 +172,13 @@ function resolveMentions(
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function GenerateNode({ id, data, selected }: NodeProps<GenerateNodeType>) {
+export default function GenerateNode({
+  id, data, selected }: NodeProps<GenerateNodeType>) {
+  const { imageModels } = useComfyProfiles();
+  const MODELS = imageModels.map((m) => ({ id: m.id, name: m.name, meta: m.provider }));
+  const MODEL_CAPS = Object.fromEntries(
+    imageModels.map((m) => [m.id, capsFromModel(m)]),
+  );
   const readOnly = useReadOnly();
   const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
   const updateNodeSize = useWorkflowStore((s) => s.updateNodeSize);
@@ -373,31 +389,21 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
   }, [id, updateNodeData]);
 
   const model = (data.model as string) ?? "nano-banana-2";
-  const caps = MODEL_CAPS[model] ?? DEFAULT_CAPS;
+  const caps = capsFromModel(imageModels.find((m) => m.id === model));
   const modelInfo = MODELS.find((m) => m.id === model) ?? MODELS[0];
   const quality = (data.quality as string) ?? "1k";
   const status = data.status ?? "idle";
 
-  const [currentProvider, setCurrentProvider] = useState<ProviderId>("kie");
-  useEffect(() => {
-    const read = () => setCurrentProvider(getModelProvider(model));
-    read();
-    window.addEventListener("storage", read);
-    window.addEventListener("aiui-providers-changed", read);
-    return () => {
-      window.removeEventListener("storage", read);
-      window.removeEventListener("aiui-providers-changed", read);
-    };
-  }, [model]);
-  const isAzureProvider = currentProvider === "azure";
-  const isCodexProvider = currentProvider === "codex";
+  const [currentProvider] = useState<"comfyui">("comfyui");
+  const isAzureProvider = false;
+  const isCodexProvider = false;
 
   const promptInfo = (() => {
     const promptEdge = edges.find((e) => e.target === id && e.targetHandle === "prompt");
     if (!promptEdge) return null;
     const promptNode = nodes.find((n) => n.id === promptEdge.source);
     const text = (promptNode?.data?.prompt as string) ?? "";
-    const cfg = IMAGE_MODELS.find((m) => m.id === model);
+    const cfg = imageModels.find((m) => m.id === model);
     const hasImages = edges.some((e) => e.target === id && e.targetHandle === "image");
     const limit = (!hasImages && cfg?.textOnlyPromptMaxLength)
       ? cfg.textOnlyPromptMaxLength
@@ -626,41 +632,12 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
       upstream.imageUrls,
     );
 
-    // Read Azure settings from localStorage (client-side, safe in useCallback)
-    const azureBaseUrl = (() => {
-      try { return localStorage.getItem("aiui-azure-base-url") ?? ""; }
-      catch { return ""; }
-    })();
-    const azureDeployment = (() => {
-      try { return JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[model] ?? ""; }
-      catch { return ""; }
-    })();
-    const isAzure = !!(azureBaseUrl && azureDeployment && (() => {
-      try { return (JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[model] ?? "kie") === "azure"; }
-      catch { return false; }
-    })());
-    const azureQuality = (data.azureQuality as string | undefined) ?? "auto";
-    const azureResolution = (data.azureResolution as string | undefined) ?? "1k";
-
-    const isCodex = !!(() => {
-      try { return (JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[model] ?? "kie") === "codex"; }
-      catch { return false; }
-    })();
-
+    // Local ComfyUI — task kind is derived server-side from reference images.
+    // Stored Kie/Azure model ids are ignored at generation time.
     const payload = {
-      model,
       prompt: resolvedPrompt,
       imageUrls: orderedUrls,
       aspectRatio,
-      quality,
-      ...(isAzure ? {
-        azureBaseUrl, azureDeployment, azureQuality, azureResolution,
-        ...(aspectRatio === "custom" ? {
-          azureCustomWidth: data.azureCustomWidth as number | undefined,
-          azureCustomHeight: data.azureCustomHeight as number | undefined,
-        } : {}),
-      } : {}),
-      ...(isCodex ? { codexProvider: true } : {}),
     };
 
     if (!resolvedPrompt.trim()) {
@@ -1124,40 +1101,6 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
             )}
           </div>
 
-          {/* Provider pill — only for models with more than one backend (e.g. GPT Image 2) */}
-          {modelHasProviderChoice(model) && (
-            <div className="relative shrink-0">
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => { setProviderOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setQualityOpen(false); }}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:brightness-125 transition-all"
-                style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.07)" }}
-                title="Provider"
-              >
-                <span className="flex items-center gap-1.5 text-[11px] text-white/70">
-                  <ProviderBrandIcon id={currentProvider} />
-                  {PROVIDERS.find((p) => p.id === currentProvider)?.label ?? "Kie.ai"}
-                </span>
-                <ChevronIcon open={providerOpen} />
-              </button>
-              {providerPopup.visible && (
-                <div className={`absolute bottom-full left-0 mb-2 w-36 bg-[#111622] border border-[#1E2840] rounded-md overflow-hidden z-[1002] shadow-2xl ${providerPopup.className}`}>
-                  {PROVIDERS.map((p) => (
-                    <button
-                      key={p.id}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={() => { setModelProvider(model, p.id); setProviderOpen(false); }}
-                      className={`w-full flex items-center gap-1.5 px-3 py-[7px] text-[11px] hover:bg-[#141C28] transition-colors ${currentProvider === p.id ? "text-white" : "text-[#A0A0A0]"}`}
-                    >
-                      <ProviderBrandIcon id={p.id} />
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Ratio pill */}
           <div className="relative shrink-0">
             <button
@@ -1244,7 +1187,7 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
                       />
                     </div>
                     <div className="grid grid-cols-2 gap-1 mb-2">
-                      {AZURE_POPULAR_SIZES.map((p) => (
+                      {([] as { label: string; width: number; height: number }[]).map((p) => (
                         <button
                           key={p.label}
                           onMouseDown={(e) => e.stopPropagation()}
@@ -1261,7 +1204,7 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
                     <button
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={() => {
-                        const err = validateAzureCustomSize(customWidthDraft, customHeightDraft);
+                        const err = ((_w: number, _h: number) => null as string | null)(customWidthDraft, customHeightDraft);
                         if (err) { setCustomSizeError(err); return; }
                         updateNodeData(id, { aspectRatio: "custom", azureCustomWidth: customWidthDraft, azureCustomHeight: customHeightDraft });
                         setAzureCustomSizeOpen(false);
@@ -1552,29 +1495,8 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
-/** Backend brand mark for the Provider pill (kie/azure/codex) — distinct from NodeProviderIcon's model-brand icons. */
-function ProviderBrandIcon({ id }: { id: ProviderId }) {
-  if (id === "kie") {
-    return (
-      <span className="text-[#2DD4BF] shrink-0" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "11px", height: "11px", fontSize: "10px", fontWeight: 700 }}>
-        K
-      </span>
-    );
-  }
-  if (id === "codex") {
-    return (
-      <svg className="text-[#2DD4BF] shrink-0" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd">
-        <path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z" />
-      </svg>
-    );
-  }
-  if (id === "azure") {
-    return (
-      <svg className="shrink-0" width="11" height="11" viewBox="0 0 256 199">
-        <path d="M118.432 187.698c32.89-5.81 60.055-10.618 60.367-10.684l.568-.12l-31.052-36.935c-17.078-20.314-31.051-37.014-31.051-37.11c0-.182 32.063-88.477 32.243-88.792c.06-.105 21.88 37.567 52.893 91.32c29.035 50.323 52.973 91.815 53.195 92.203l.405.707l-98.684-.012l-98.684-.013l59.8-10.564zM0 176.435c0-.052 14.631-25.451 32.514-56.442l32.514-56.347l37.891-31.799C123.76 14.358 140.867.027 140.935.001c.069-.026-.205.664-.609 1.534s-18.919 40.582-41.145 88.25l-40.41 86.67l-29.386.037c-16.162.02-29.385-.005-29.385-.057z" fill="#0089D6" fillRule="nonzero" />
-      </svg>
-    );
-  }
+/** Unused — kept so old spaces referencing brand icons still typecheck if reintroduced. */
+function ProviderBrandIcon(_props: { id: string }) {
   return null;
 }
 

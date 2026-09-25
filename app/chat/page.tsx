@@ -5,7 +5,8 @@ import { flushSync } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useChatSessionStore, type StoredMessage, type ChatSession } from "@/lib/chatSessionStore";
 import { getToken } from "@/lib/galleryUtils";
-import { MODEL_GROUPS, MODELS, type ModelId } from "@/lib/models";
+import { type ModelId } from "@/lib/models";
+import { useOllamaChatModels } from "@/lib/useOllamaChatModels";
 import { SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { Send, ChevronUp, Copy, Check } from "lucide-react";
 import { motion } from "motion/react";
@@ -13,7 +14,6 @@ import Image from "next/image";
 import DotCanvasBackground from "@/components/ui/DotCanvasBackground";
 import TypewriterHeading from "@/components/ui/TypewriterHeading";
 import { useWorkflowStore } from "@/lib/store";
-import { loadAzureBaseUrl, loadAzureTextDeployment, loadAzureTextModelName } from "@/components/SettingsModal";
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
 
@@ -24,12 +24,15 @@ function LogoIcon({ size = 40 }: { size?: number }) {
 // ── Model picker ──────────────────────────────────────────────────────────────
 
 function ModelPicker({
-  model, onChange, direction = "up", disabledIds = [],
+  model, onChange, direction = "up", disabled = false, disabledMessage,
+  groups,
 }: {
   model: ModelId;
   onChange: (id: ModelId) => void;
   direction?: "up" | "down";
-  disabledIds?: string[];
+  disabled?: boolean;
+  disabledMessage?: string | null;
+  groups: ReturnType<typeof useOllamaChatModels>["groups"];
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -42,7 +45,8 @@ function ModelPicker({
     return () => window.removeEventListener("pointerdown", onPointer);
   }, []);
 
-  const current = MODELS.find(m => m.id === model);
+  const models = groups.flatMap((g) => g.models);
+  const current = models.find(m => m.id === model);
   const dropPos = direction === "up"
     ? { bottom: "calc(100% + 6px)" }
     : { top: "calc(100% + 6px)" };
@@ -50,18 +54,20 @@ function ModelPicker({
   return (
     <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => { if (!disabled) setOpen(o => !o); }}
+        disabled={disabled}
+        title={disabled ? (disabledMessage ?? undefined) : undefined}
         style={{
           display: "flex", alignItems: "center", gap: "5px",
           padding: "0 8px", height: "32px", borderRadius: "8px",
           background: open ? "rgba(255,255,255,0.09)" : "transparent",
           border: "1px solid transparent",
-          color: "rgba(255,255,255,0.5)", fontSize: "12px",
-          fontFamily: "inherit", cursor: "pointer",
+          color: disabled ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.5)", fontSize: "12px",
+          fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer",
           transition: "background 120ms, color 120ms", whiteSpace: "nowrap",
         }}
       >
-        {current?.label}
+        {disabled ? (disabledMessage?.slice(0, 42) ?? "No Ollama models") : (current?.label ?? (model || "Select model"))}
         <ChevronUp
           size={12}
           style={{
@@ -73,7 +79,7 @@ function ModelPicker({
           }}
         />
       </button>
-      {open && (
+      {open && !disabled && (
         <div style={{
           position: "absolute", right: 0, ...dropPos,
           minWidth: "180px", background: "rgba(14,16,18,0.98)",
@@ -81,39 +87,34 @@ function ModelPicker({
           boxShadow: "0 8px 32px rgba(0,0,0,0.6)", overflow: "hidden", zIndex: 100,
         }}>
           <div style={{ padding: "4px" }}>
-            {MODEL_GROUPS.map((group, gi) => (
+            {groups.map((group, gi) => (
               <div key={group.label}>
                 {gi > 0 && <div style={{ height: "1px", background: "rgba(255,255,255,0.07)", margin: "4px 0" }} />}
                 <div style={{ padding: "4px 8px 2px", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "rgba(255,255,255,0.25)" }}>
                   {group.label}
                 </div>
-                {group.models.map(m => {
-                  const disabled = disabledIds.includes(m.id);
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => { if (!disabled) { onChange(m.id); setOpen(false); } }}
-                      title={disabled ? "Configure Azure in Settings → API Keys" : undefined}
-                      style={{
-                        display: "flex", alignItems: "center", justifyContent: "space-between",
-                        width: "100%", padding: "7px 8px", borderRadius: "7px", border: "none",
-                        background: model === m.id ? "rgba(45,212,191,0.12)" : "transparent",
-                        color: disabled ? "rgba(255,255,255,0.25)" : model === m.id ? "rgba(94,234,212,0.95)" : "rgba(255,255,255,0.7)",
-                        fontSize: "13px", fontFamily: "inherit",
-                        cursor: disabled ? "not-allowed" : "pointer",
-                        textAlign: "left", transition: "background 100ms",
-                        opacity: disabled ? 0.5 : 1,
-                      }}
-                      onMouseEnter={e => { if (!disabled && model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-                      onMouseLeave={e => { if (!disabled && model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-                    >
-                      <span>{m.label}</span>
-                      <span style={{ fontSize: "10px", color: disabled ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.28)", marginLeft: "8px" }}>
-                        {disabled ? "needs Azure key" : m.desc}
-                      </span>
-                    </button>
-                  );
-                })}
+                {group.models.map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => { onChange(m.id); setOpen(false); }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      width: "100%", padding: "7px 8px", borderRadius: "7px", border: "none",
+                      background: model === m.id ? "rgba(45,212,191,0.12)" : "transparent",
+                      color: model === m.id ? "rgba(94,234,212,0.95)" : "rgba(255,255,255,0.7)",
+                      fontSize: "13px", fontFamily: "inherit",
+                      cursor: "pointer",
+                      textAlign: "left", transition: "background 100ms",
+                    }}
+                    onMouseEnter={e => { if (model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
+                    onMouseLeave={e => { if (model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+                  >
+                    <span>{m.label}</span>
+                    <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.28)", marginLeft: "8px" }}>
+                      {m.desc}
+                    </span>
+                  </button>
+                ))}
               </div>
             ))}
           </div>
@@ -183,19 +184,20 @@ function useCyclingPlaceholder(paused: boolean) {
 
 
 function LandingView({
-  onSubmit, model, onModelChange,
+  onSubmit, model, onModelChange, groups, pickerDisabled, pickerMessage,
 }: {
   onSubmit: (text: string) => void;
   model: ModelId;
   onModelChange: (id: ModelId) => void;
+  groups: ReturnType<typeof useOllamaChatModels>["groups"];
+  pickerDisabled: boolean;
+  pickerMessage: string | null;
 }) {
   const [input, setInput] = useState("");
   const [headingDone, setHeadingDone] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const animatedPlaceholder = useCyclingPlaceholder(!headingDone || input.length > 0);
-  const kieKeySet   = useWorkflowStore((s) => s.kieKeySet);
-  const azureKeySet = useWorkflowStore((s) => s.azureKeySet);
-  const disabledIds = azureKeySet === true ? [] : ["azure-auto"];
+  const ollamaAvailable   = useWorkflowStore((s) => s.ollamaAvailable);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -207,6 +209,8 @@ function LandingView({
   function onKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(input); }
   }
+
+  const canSend = !!input.trim() && ollamaAvailable !== false && !pickerDisabled && !!model;
 
   return (
     <div style={{
@@ -262,15 +266,15 @@ function LandingView({
             }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginLeft: "12px", flexShrink: 0 }}>
-            <ModelPicker model={model} onChange={onModelChange} direction="down" disabledIds={disabledIds} />
+            <ModelPicker model={model} onChange={onModelChange} direction="down" groups={groups} disabled={pickerDisabled} disabledMessage={pickerMessage} />
             <button
               onClick={() => submit(input)}
-              disabled={!input.trim() || kieKeySet === false || disabledIds.includes(model)}
+              disabled={!canSend}
               style={{
                 width: "36px", height: "36px", borderRadius: "50%", border: "none",
-                background: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)",
-                color: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)",
-                cursor: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "pointer" : "not-allowed",
+                background: canSend ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)",
+                color: canSend ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)",
+                cursor: canSend ? "pointer" : "not-allowed",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 flexShrink: 0, transition: "background 150ms, color 150ms",
               }}
@@ -296,6 +300,7 @@ interface LiveMessage {
 
 function ChatWindow({
   session, onUpdate, defaultModel, onModelChange, onAuthRequired, initialMessage,
+  groups, pickerDisabled, pickerMessage,
 }: {
   session: ChatSession;
   onUpdate: (msgs: StoredMessage[], model: string) => void;
@@ -303,22 +308,24 @@ function ChatWindow({
   onModelChange?: (id: ModelId) => void;
   onAuthRequired?: () => void;
   initialMessage?: string;
+  groups: ReturnType<typeof useOllamaChatModels>["groups"];
+  pickerDisabled: boolean;
+  pickerMessage: string | null;
 }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [messages, setMessages] = useState<LiveMessage[]>(() =>
     session.messages.map((m) => ({ ...m }))
   );
   const [input, setInput] = useState("");
-  const [model, setModel] = useState<ModelId>((session.model || defaultModel || "claude-sonnet-4-6") as ModelId);
+  const [model, setModel] = useState<ModelId>((session.model || defaultModel || "") as ModelId);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-  const kieKeySet   = useWorkflowStore((s) => s.kieKeySet);
-  const azureKeySet = useWorkflowStore((s) => s.azureKeySet);
-  const disabledIds = azureKeySet === true ? [] : ["azure-auto"];
+  const ollamaAvailable   = useWorkflowStore((s) => s.ollamaAvailable);
 
   function handleModelChange(id: ModelId) { setModel(id); onModelChange?.(id); }
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const canSend = !!input.trim() && !isStreaming && ollamaAvailable !== false && !pickerDisabled && !!model;
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -352,11 +359,6 @@ function ChatWindow({
 
     try {
       const token = await getToken();
-      const azureConfig = model === "azure-auto" ? {
-        azureEndpoint:   loadAzureBaseUrl(),
-        azureDeployment: loadAzureTextDeployment(),
-        azureModelName:  loadAzureTextModelName(),
-      } : {};
 
       const res = await fetch("/api/assistant", {
         method: "POST",
@@ -371,7 +373,6 @@ function ChatWindow({
             ...contextMessages.map((m) => ({ role: m.role, content: m.content })),
           ],
           stream: true,
-          ...azureConfig,
         }),
         signal: abort.signal,
       });
@@ -458,8 +459,8 @@ function ChatWindow({
               onInput={e => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px"; }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginLeft: "12px", flexShrink: 0 }}>
-              <ModelPicker model={model} onChange={handleModelChange} direction="down" disabledIds={disabledIds} />
-              <button onClick={() => send(input)} disabled={!input.trim() || kieKeySet === false || disabledIds.includes(model)} style={{ width: "36px", height: "36px", borderRadius: "50%", border: "none", background: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)", color: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)", cursor: input.trim() && kieKeySet !== false && !disabledIds.includes(model) ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 150ms, color 150ms" }}>
+              <ModelPicker model={model} onChange={handleModelChange} direction="down" groups={groups} disabled={pickerDisabled} disabledMessage={pickerMessage} />
+              <button onClick={() => send(input)} disabled={!input.trim() || ollamaAvailable === false || pickerDisabled || !model} style={{ width: "36px", height: "36px", borderRadius: "50%", border: "none", background: input.trim() && ollamaAvailable !== false && !pickerDisabled && model ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)", color: input.trim() && ollamaAvailable !== false && !pickerDisabled && model ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)", cursor: input.trim() && ollamaAvailable !== false && !pickerDisabled && model ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 150ms, color 150ms" }}>
                 <Send size={15} />
               </button>
             </div>
@@ -564,15 +565,15 @@ function ChatWindow({
             }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: "6px", marginLeft: "8px", flexShrink: 0 }}>
-            <ModelPicker model={model} onChange={handleModelChange} disabledIds={disabledIds} />
+            <ModelPicker model={model} onChange={handleModelChange} groups={groups} disabled={pickerDisabled} disabledMessage={pickerMessage} />
             <button
               onClick={() => send(input)}
-              disabled={!input.trim() || isStreaming || kieKeySet === false || disabledIds.includes(model)}
+              disabled={!input.trim() || isStreaming || ollamaAvailable === false || pickerDisabled || !model}
               style={{
                 width: "32px", height: "32px", borderRadius: "8px", border: "none",
-                background: input.trim() && !isStreaming && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)",
-                color: input.trim() && !isStreaming && kieKeySet !== false && !disabledIds.includes(model) ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)",
-                cursor: input.trim() && !isStreaming && kieKeySet !== false && !disabledIds.includes(model) ? "pointer" : "not-allowed",
+                background: input.trim() && !isStreaming && ollamaAvailable !== false && !pickerDisabled || !model ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)",
+                color: input.trim() && !isStreaming && ollamaAvailable !== false && !pickerDisabled || !model ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)",
+                cursor: input.trim() && !isStreaming && ollamaAvailable !== false && !pickerDisabled || !model ? "pointer" : "not-allowed",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 flexShrink: 0, transition: "background 150ms, color 150ms",
               }}
@@ -605,12 +606,16 @@ function ChatInner() {
   const idParam = searchParams.get("id");
 
   const { sessions, createSession, upsertSession, preferredModel, setPreferredModel } = useChatSessionStore();
+  const ollamaChat = useOllamaChatModels();
+  const pickerDisabled = ollamaChat.available === false || ollamaChat.empty;
   const [hydrated, setHydrated] = useState(false);
-  const [landingModel, setLandingModel] = useState<ModelId>("claude-sonnet-4-6");
+  const [landingModel, setLandingModel] = useState<ModelId>("");
   const [pendingMessage, setPendingMessage] = useState("");
 
-  // Sync landingModel from store once hydrated
-  useEffect(() => { if (hydrated) setLandingModel(preferredModel as ModelId); }, [hydrated]);
+  // Sync landingModel from store once hydrated / models loaded
+  useEffect(() => {
+    if (hydrated && preferredModel) setLandingModel(preferredModel as ModelId);
+  }, [hydrated, preferredModel]);
 
   useEffect(() => {
     const unsub = useChatSessionStore.persist?.onFinishHydration(() => setHydrated(true));
@@ -644,12 +649,18 @@ function ChatInner() {
           defaultModel={preferredModel}
           onModelChange={setPreferredModel}
           initialMessage={pendingMessage || undefined}
+          groups={ollamaChat.groups}
+          pickerDisabled={pickerDisabled}
+          pickerMessage={ollamaChat.statusMessage}
         />
       ) : (
         <LandingView
           onSubmit={handleLandingSubmit}
           model={landingModel}
           onModelChange={id => { setLandingModel(id); setPreferredModel(id); }}
+          groups={ollamaChat.groups}
+          pickerDisabled={pickerDisabled}
+          pickerMessage={ollamaChat.statusMessage}
         />
       )}
     </div>

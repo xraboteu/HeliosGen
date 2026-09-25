@@ -2,11 +2,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { getToken } from "@/lib/galleryUtils";
-import { MODEL_GROUPS, MODELS, type ModelId } from "@/lib/models";
+import { type ModelId } from "@/lib/models";
 import { useChatSessionStore } from "@/lib/chatSessionStore";
 import { SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { useWorkflowStore } from "@/lib/store";
-import { loadAzureBaseUrl, loadAzureTextDeployment, loadAzureTextModelName } from "@/components/SettingsModal";
+import { useOllamaChatModels } from "@/lib/useOllamaChatModels";
 
 interface Message {
   role: "user" | "assistant";
@@ -22,6 +22,9 @@ export function QuickAssist() {
   const [streaming, setStreaming] = useState(false);
   const { preferredModel, setPreferredModel } = useChatSessionStore();
   const [model, setModel] = useState<ModelId>(preferredModel as ModelId);
+  useEffect(() => {
+    if (preferredModel) setModel(preferredModel as ModelId);
+  }, [preferredModel]);
   const [modelOpen, setModelOpen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
@@ -31,8 +34,10 @@ export function QuickAssist() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const { createSession, upsertSession } = useChatSessionStore();
-  const azureKeySet = useWorkflowStore((s) => s.azureKeySet);
-  const disabledIds = azureKeySet === true ? [] : ["azure-auto"];
+  const ollamaChat = useOllamaChatModels();
+  const pickerDisabled = ollamaChat.available === false || ollamaChat.empty;
+  const MODEL_GROUPS = ollamaChat.groups;
+  const MODELS = ollamaChat.models;
 
   // Sync to store when streaming stops
   useEffect(() => {
@@ -98,24 +103,15 @@ export function QuickAssist() {
       const token = await getToken();
       const reqHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (token) reqHeaders["Authorization"] = `Bearer ${token}`;
-      const azureConfig = model === "azure-auto" ? {
-        azureEndpoint:   loadAzureBaseUrl(),
-        azureDeployment: loadAzureTextDeployment(),
-        azureModelName:  loadAzureTextModelName(),
-      } : {};
       const res = await fetch("/api/assistant", {
         method: "POST",
         headers: reqHeaders,
         body: JSON.stringify({
-          model,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             ...newMessages.map(m => ({ role: m.role, content: m.content })),
           ],
           stream: true,
-          thinkingFlag: true,
-          max_tokens: 1024,
-          ...azureConfig,
         }),
         signal: abort.signal,
       });
@@ -271,14 +267,14 @@ export function QuickAssist() {
             <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: "12px", padding: "8px 8px 8px 12px" }}>
               <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey} placeholder="Describe your idea…" rows={1} disabled={streaming} style={{ flex: 1, background: "transparent", border: "none", outline: "none", resize: "none", color: "rgba(255,255,255,0.88)", fontSize: "13.5px", fontFamily: "inherit", letterSpacing: "-0.01em", lineHeight: "22px", maxHeight: "96px", overflowY: "auto", padding: 0, cursor: streaming ? "not-allowed" : "text" }}
                 onInput={e => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 96) + "px"; }} />
-              <button onClick={() => send(input)} disabled={!input.trim() || streaming || disabledIds.includes(model)} style={{ width: "32px", height: "32px", borderRadius: "8px", border: "none", background: input.trim() && !streaming && !disabledIds.includes(model) ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)", color: input.trim() && !streaming && !disabledIds.includes(model) ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)", cursor: input.trim() && !streaming && !disabledIds.includes(model) ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, transition: "background 150ms, color 150ms" }}>
+              <button onClick={() => send(input)} disabled={!input.trim() || streaming || pickerDisabled || !model} style={{ width: "32px", height: "32px", borderRadius: "8px", border: "none", background: input.trim() && !streaming && !pickerDisabled && !!model ? "rgba(45,212,191,0.25)" : "rgba(255,255,255,0.07)", color: input.trim() && !streaming && !pickerDisabled && !!model ? "rgba(45,212,191,0.9)" : "rgba(255,255,255,0.25)", cursor: input.trim() && !streaming && !pickerDisabled && !!model ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, transition: "background 150ms, color 150ms" }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </button>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "8px", padding: "0 2px" }}>
               {/* Model picker */}
               <div data-model-picker="" style={{ position: "relative" }}>
-                <button onClick={() => setModelOpen(o => !o)} style={{ display: "flex", alignItems: "center", gap: "5px", padding: "2px 7px 2px 8px", borderRadius: "6px", background: modelOpen ? "rgba(255,255,255,0.09)" : "transparent", border: "1px solid transparent", fontSize: "10px", color: "rgba(255,255,255,0.35)", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", cursor: "pointer", fontFamily: "inherit", transition: "background 120ms, color 120ms" }}
+                <button onClick={() => { if (!pickerDisabled) setModelOpen(o => !o); }} disabled={pickerDisabled} title={pickerDisabled ? (ollamaChat.statusMessage ?? undefined) : undefined} style={{ display: "flex", alignItems: "center", gap: "5px", padding: "2px 7px 2px 8px", borderRadius: "6px", background: modelOpen ? "rgba(255,255,255,0.09)" : "transparent", border: "1px solid transparent", fontSize: "10px", color: "rgba(255,255,255,0.35)", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", cursor: "pointer", fontFamily: "inherit", transition: "background 120ms, color 120ms" }}
                   onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.09)"; (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.65)"; }}
                   onMouseLeave={e => { if (!modelOpen) { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.35)"; } }}>
                   {MODELS.find(m => m.id === model)?.label}
@@ -292,16 +288,16 @@ export function QuickAssist() {
                           {gi > 0 && <div style={{ height: "1px", background: "rgba(255,255,255,0.07)", margin: "4px 0" }} />}
                           <div style={{ padding: "4px 8px 2px", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "rgba(255,255,255,0.25)" }}>{group.label}</div>
                           {group.models.map(m => {
-                            const isDisabled = disabledIds.includes(m.id);
+                            const isDisabled = pickerDisabled;
                             return (
                             <button key={m.id}
                               onClick={() => { if (!isDisabled) { setModel(m.id); setPreferredModel(m.id); setModelOpen(false); } }}
-                              title={isDisabled ? "Configure Azure in Settings → API Keys" : undefined}
+                              title={isDisabled ? (ollamaChat.statusMessage ?? "Unavailable") : undefined}
                               style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "7px 8px", borderRadius: "7px", border: "none", background: model === m.id ? "rgba(45,212,191,0.12)" : "transparent", color: isDisabled ? "rgba(255,255,255,0.25)" : model === m.id ? "rgba(94,234,212,0.95)" : "rgba(255,255,255,0.7)", fontSize: "13px", fontFamily: "inherit", cursor: isDisabled ? "not-allowed" : "pointer", textAlign: "left", transition: "background 100ms", opacity: isDisabled ? 0.5 : 1 }}
                               onMouseEnter={e => { if (!isDisabled && model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
                               onMouseLeave={e => { if (!isDisabled && model !== m.id) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}>
                               <span>{m.label}</span>
-                              <span style={{ fontSize: "10px", color: isDisabled ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.28)", marginLeft: "8px" }}>{isDisabled ? "needs Azure key" : m.desc}</span>
+                              <span style={{ fontSize: "10px", color: isDisabled ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.28)", marginLeft: "8px" }}>{isDisabled ? "unavailable" : m.desc}</span>
                             </button>
                             );
                           })}

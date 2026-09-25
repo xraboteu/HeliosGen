@@ -7,9 +7,7 @@ import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation
 type VideoGenNodeType = Node<NodeData, "videoGenNode">;
 
 const VIDEO_MODELS = [
-  { value: "wan-t2v", label: "Wan 2.1 Text→Video" },
-  { value: "wan-i2v", label: "Wan 2.1 Image→Video" },
-  { value: "svd", label: "Stable Video Diffusion" },
+  { value: "", label: "ComfyUI video profile" },
 ];
 
 const STATUS_RING: Record<string, string> = {

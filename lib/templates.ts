@@ -171,7 +171,7 @@ export function makeUGCTemplate(): {
       data: {
         label: `Video Generator #${i + 1}`,
         status: "done",
-        videoModel: "seedance-2",
+        videoModel: "",
         aspectRatio: "9:16",
         grokResolution: "1080p",
         sound: true,
@@ -189,7 +189,7 @@ export function makeUGCTemplate(): {
       data: {
         label: `Image Generator #${i + 1}`,
         status: "done",
-        model: "nano-banana-pro",
+        model: "",
         aspectRatio: "9:16",
         quality: "2k",
         imageUrl: REF_IMAGES[i],

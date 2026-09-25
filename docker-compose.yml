@@ -1,0 +1,20 @@
+services:
+  heliosgen:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      HELIOS_DATA_DIR: /data
+      HELIOS_MEDIA_DIR: /media
+    volumes:
+      - helios-data:/data
+      - helios-media:/media
+    extra_hosts:
+      # Lets the container reach ComfyUI / Ollama published on the host
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  helios-data:
+  helios-media:

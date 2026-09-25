@@ -42,9 +42,10 @@ The app is **not code-signed** yet:
 
 ## 🚀 First run
 
-1. Launch HeliosGen.
-2. Open **Settings → API Keys** and paste your **[kie.ai](https://kie.ai?ref=25abb3f2236cbff9780ab9c2f84479ec) API key**.
-3. Start generating.
+1. Launch HeliosGen (desktop) **or** run via Docker (see below).
+2. Start **ComfyUI** (port `8188`) and **Ollama** (port `11434`) on the host.
+3. Open **Settings → Local providers**, confirm the URLs, test the connections, import ComfyUI **API Format** workflows per task kind, and pick an Ollama chat model.
+4. Start generating.
 
 Everything stays on your machine. Generations, uploads, folders, workflows and
 settings live in a local database; media is saved to a local folder:
@@ -277,6 +278,67 @@ Runs `next dev` and `tauri dev` together. The first run compiles the Rust shell
 
 See [`DESKTOP.md`](DESKTOP.md) for architecture, data locations, and signing &
 notarization.
+
+---
+
+# 🐳 Docker
+
+HeliosGen can run in Docker while **ComfyUI** and **Ollama** stay on the host
+(typical ports `8188` and `11434`). The container reaches them via
+`host.docker.internal`.
+
+```bash
+# From the repo root
+cp .env.example .env   # optional — defaults already match host.docker.internal
+docker compose up --build
+```
+
+Then open http://localhost:3000 → **Settings → Local providers**.
+
+| Service | Default URL from the container |
+| --- | --- |
+| ComfyUI | `http://host.docker.internal:8188` |
+| Ollama | `http://host.docker.internal:11434` |
+
+Volumes:
+
+- `helios-data` → `HELIOS_DATA_DIR` (SQLite + settings)
+- `helios-media` → `HELIOS_MEDIA_DIR` (`/generated/...` media)
+
+Override URLs:
+
+```bash
+COMFYUI_URL=http://host.docker.internal:8188 \
+OLLAMA_URL=http://host.docker.internal:11434 \
+docker compose up --build
+```
+
+Or build the image alone:
+
+```bash
+docker build -t heliosgen .
+docker run --rm -p 3000:3000 \
+  -e COMFYUI_URL=http://host.docker.internal:8188 \
+  -e OLLAMA_URL=http://host.docker.internal:11434 \
+  --add-host=host.docker.internal:host-gateway \
+  -v helios-data:/data -v helios-media:/media \
+  heliosgen
+```
+
+### Expected ComfyUI setup
+
+Export one workflow per task kind in **API Format** (not the UI graph with
+`nodes` / `links`):
+
+- `image.text-to-image`
+- `image.image-to-image`
+- `video.text-to-video`
+- `video.image-to-video`
+
+Each workflow needs a prompt binding (e.g. `CLIPTextEncode`). Image-to-image /
+image-to-video also need an image binding (`LoadImage`). Outputs must appear in
+`/history` (`images`, `gifs`, or `videos`) so HeliosGen can copy them into local
+media.
 
 ---
 

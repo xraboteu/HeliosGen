@@ -50,7 +50,7 @@ export const NODES: Array<{
         </svg>
       ),
       label: "Video",
-      description: "Google Veo / Kling 3.0 · video generation",
+      description: "ComfyUI · video generation",
     },
     {
       type: "generateNode",
@@ -64,7 +64,7 @@ export const NODES: Array<{
         </svg>
       ),
       label: "Image",
-      description: "Nano Banana 2 · image generation",
+      description: "ComfyUI · image generation",
     },
 
     /* ── Resources ──────────────────────────────────────────────────────────── */
