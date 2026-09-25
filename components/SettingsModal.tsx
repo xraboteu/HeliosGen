@@ -1,1515 +1,880 @@
 "use client";
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { IMAGE_MODELS, VIDEO_MODELS } from "@/lib/modelConfig";
-import { MODEL_GROUPS } from "@/lib/models";
+
+import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import { useWorkflowStore } from "@/lib/store";
-import { PROVIDERS, ProviderId, loadModelProviders, saveModelProviders, getModelProvider } from "@/lib/providers";
+import type {
+  CheckpointBinding,
+  ComfyProfileMode,
+  ComfyProfileType,
+  WorkflowBinding,
+  WorkflowBindings,
+} from "@/lib/providers/types";
 
-/* ─── Provider options (re-exported for backwards compat) ───────────────────── */
-
-export { PROVIDERS, loadModelProviders, saveModelProviders, getModelProvider };
-export type { ProviderId };
-
-export type CodexStatus =
-  | { kind: "unknown" }
-  | { kind: "ready" }
-  | { kind: "not_ready"; installed: boolean; authFound: boolean };
-
-/* ─── Persistence ───────────────────────────────────────────────────────────── */
-
-const AZURE_DEPLOYS_KEY      = "aiui-azure-endpoints";       // per-model deployment names
-const AZURE_BASE_KEY         = "aiui-azure-base-url";        // global Foundry base URL
-const AZURE_TEXT_DEPLOY_KEY  = "aiui-azure-text-deployment"; // text model deployment (URL path)
-const AZURE_TEXT_MODEL_KEY   = "aiui-azure-text-model";      // text model name (request body)
-
-/** Per-model deployment name map (e.g. { "gpt-image-2": "gpt-image-2" }). */
-export function loadAzureEndpoints(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(AZURE_DEPLOYS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-export function saveAzureEndpoints(map: Record<string, string>) {
-  try {
-    localStorage.setItem(AZURE_DEPLOYS_KEY, JSON.stringify(map));
-  } catch { /* noop */ }
-}
-
-/** Returns the deployment name for a given model, or "" if unset. */
-export function getAzureDeployment(modelId: string): string {
-  return loadAzureEndpoints()[modelId] ?? "";
-}
-
-/** Global Azure Cognitive Services base URL (shared across all models). */
-export function loadAzureBaseUrl(): string {
-  try {
-    return localStorage.getItem(AZURE_BASE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-export function saveAzureBaseUrl(url: string) {
-  try {
-    localStorage.setItem(AZURE_BASE_KEY, url);
-  } catch { /* noop */ }
-}
-
-/** @deprecated renamed — use getAzureDeployment(). Kept for backwards compat. */
-export const getAzureEndpoint = getAzureDeployment;
-
-/** Deployment name — used in the URL path (defaults to "auto-model"). */
-export function loadAzureTextDeployment(): string {
-  try {
-    return localStorage.getItem(AZURE_TEXT_DEPLOY_KEY) ?? "auto-model";
-  } catch {
-    return "auto-model";
-  }
-}
-
-export function saveAzureTextDeployment(name: string) {
-  try {
-    localStorage.setItem(AZURE_TEXT_DEPLOY_KEY, name);
-  } catch { /* noop */ }
-}
-
-/** Model name — passed in the request body (defaults to "model-router"). */
-export function loadAzureTextModelName(): string {
-  try {
-    return localStorage.getItem(AZURE_TEXT_MODEL_KEY) ?? "model-router";
-  } catch {
-    return "model-router";
-  }
-}
-
-export function saveAzureTextModelName(name: string) {
-  try {
-    localStorage.setItem(AZURE_TEXT_MODEL_KEY, name);
-  } catch { /* noop */ }
-}
-
-/* ─── Nav items ─────────────────────────────────────────────────────────────── */
+type NavId = "local-providers" | "debug";
 
 const IS_DEBUG = process.env.NEXT_PUBLIC_DEBUG === "true";
 
-type NavId = "api-keys" | "image-models" | "video-models" | "text-models" | "debug";
-
-const NAV_BASE: { id: NavId; label: string; icon: React.ReactNode }[] = [
-  {
-    id: "api-keys",
-    label: "API Keys",
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="8" cy="15" r="4" />
-        <path d="m11.31 11.31 5.19-5.19" />
-        <path d="m17 5 1.5 1.5" />
-        <path d="m14 8 1.5 1.5" />
-      </svg>
-    ),
-  },
-  {
-    id: "image-models",
-    label: "Image Models",
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" />
-        <circle cx="8.5" cy="8.5" r="1.5" />
-        <path d="m21 15-5-5L5 21" />
-      </svg>
-    ),
-  },
-  {
-    id: "video-models",
-    label: "Video Models",
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="m22 8-6 4 6 4V8z" />
-        <rect x="2" y="6" width="14" height="12" rx="2" />
-      </svg>
-    ),
-  },
-  {
-    id: "text-models",
-    label: "Text Models",
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      </svg>
-    ),
-  },
+const PROFILE_MODES: Array<{ value: ComfyProfileMode; label: string; type: ComfyProfileType }> = [
+  { value: "text-to-image", label: "Text to image", type: "image" },
+  { value: "image-to-image", label: "Image to image", type: "image" },
+  { value: "text-to-video", label: "Text to video", type: "video" },
+  { value: "image-to-video", label: "Image to video", type: "video" },
 ];
 
-const DEBUG_NAV_ITEM: { id: NavId; label: string; icon: React.ReactNode } = {
-  id: "debug",
-  label: "Debug",
-  icon: (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
-      <path d="M12 8v4" />
-      <path d="M12 16h.01" />
-    </svg>
-  ),
-};
+interface ProfileDetail {
+  id: string;
+  name: string;
+  type: ComfyProfileType;
+  mode: ComfyProfileMode;
+  bindings: WorkflowBindings;
+  checkpoint?: CheckpointBinding;
+  ratios: string[];
+  durations: number[];
+  updatedAt: string;
+  nodes: Array<{ nodeId: string; classType: string; title: string; inputs: string[] }>;
+}
 
-const NAV = IS_DEBUG ? [...NAV_BASE, DEBUG_NAV_ITEM] : NAV_BASE;
+interface LocalProvidersState {
+  comfyuiUrl: string;
+  ollamaUrl: string;
+  ollamaModel: string | null;
+  profiles: ProfileDetail[];
+  status: { comfyui: boolean; ollama: boolean };
+  ollamaModels: Array<{ id: string; name: string }>;
+}
 
-/* ─── Props ─────────────────────────────────────────────────────────────────── */
+const BINDING_FIELDS: Array<{ key: keyof WorkflowBindings; label: string }> = [
+  { key: "prompt", label: "Prompt" },
+  { key: "image", label: "Image" },
+  { key: "width", label: "Width" },
+  { key: "height", label: "Height" },
+  { key: "seed", label: "Seed" },
+  { key: "duration", label: "Duration" },
+];
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-/* ─── Provider brand icons (kie/azure/codex backend pills) ───────────────────── */
-
-function ProviderBrandIcon({ id, size = 12 }: { id: ProviderId; size?: number }) {
-  if (id === "kie") {
-    return (
-      <span className="text-[#2DD4BF] shrink-0" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.83)}px`, fontWeight: 700 }}>
-        K
-      </span>
-    );
-  }
-  if (id === "codex") {
-    return (
-      <svg className="text-[#2DD4BF] shrink-0" width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd">
-        <path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z" />
-      </svg>
-    );
-  }
-  if (id === "azure") {
-    return (
-      <svg className="shrink-0" width={size} height={size} viewBox="0 0 256 199">
-        <path d="M118.432 187.698c32.89-5.81 60.055-10.618 60.367-10.684l.568-.12l-31.052-36.935c-17.078-20.314-31.051-37.014-31.051-37.11c0-.182 32.063-88.477 32.243-88.792c.06-.105 21.88 37.567 52.893 91.32c29.035 50.323 52.973 91.815 53.195 92.203l.405.707l-98.684-.012l-98.684-.013l59.8-10.564zM0 176.435c0-.052 14.631-25.451 32.514-56.442l32.514-56.347l37.891-31.799C123.76 14.358 140.867.027 140.935.001c.069-.026-.205.664-.609 1.534s-18.919 40.582-41.145 88.25l-40.41 86.67l-29.386.037c-16.162.02-29.385-.005-29.385-.057z" fill="#0089D6" fillRule="nonzero" />
-      </svg>
-    );
-  }
-  return null;
-}
-
-/* ─── Toggle ─────────────────────────────────────────────────────────────────── */
-
-function ProviderToggle({
-  modelId,
-  value,
-  onChange,
-}: {
-  modelId: string;
-  value: ProviderId;
-  onChange: (v: ProviderId) => void;
-}) {
+function StatusDot({ ok }: { ok: boolean | null }) {
+  const color =
+    ok === null ? "rgba(255,255,255,0.25)" : ok ? "rgba(74,222,128,0.9)" : "rgba(239,68,68,0.9)";
   return (
-    <div
+    <span
       style={{
-        display: "flex",
-        alignItems: "center",
-        background: "rgba(255,255,255,0.04)",
-        borderRadius: "8px",
-        padding: "3px",
-        gap: "2px",
-        border: "1px solid rgba(255,255,255,0.07)",
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: color,
+        display: "inline-block",
         flexShrink: 0,
       }}
-    >
-      {PROVIDERS.map((p) => {
-        const active = value === p.id;
-        return (
-          <button
-            key={p.id}
-            id={`provider-${modelId}-${p.id}`}
-            onClick={() => onChange(p.id)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "5px",
-              padding: "4px 10px",
-              borderRadius: "6px",
-              border: "none",
-              cursor: "pointer",
-              fontSize: "11px",
-              fontWeight: 500,
-              letterSpacing: "0.01em",
-              transition: "background 140ms ease, color 140ms ease",
-              background: active ? "rgba(255,255,255,0.1)" : "transparent",
-              color: active ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.32)",
-              whiteSpace: "nowrap",
-            }}
-          >
-            <ProviderBrandIcon id={p.id} />
-            {p.label}
-          </button>
-        );
-      })}
-    </div>
+    />
   );
 }
 
-/* ─── Model row ─────────────────────────────────────────────────────────────── */
-
-function ModelRow({
-  id,
-  name,
-  providerLabel,
-  category,
-  value,
-  onChange,
-  azureSupported,
-}: {
-  id: string;
-  name: string;
-  providerLabel: string;
-  category: string;
-  value: ProviderId;
-  onChange: (v: ProviderId) => void;
-  azureSupported: boolean;
-}) {
+function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "14px",
-        padding: "11px 16px",
-        borderRadius: "10px",
-        background: "rgba(255,255,255,0.02)",
-        border: "1px solid rgba(255,255,255,0.05)",
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: "0.04em",
+        textTransform: "uppercase",
+        color: "rgba(255,255,255,0.35)",
+        marginBottom: 6,
       }}
     >
-      {/* Labels */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: "13px",
-            fontWeight: 500,
-            color: "rgba(255,255,255,0.85)",
-            lineHeight: 1.3,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {name}
-        </div>
-        <div
-          style={{
-            fontSize: "11px",
-            color: "rgba(255,255,255,0.28)",
-            marginTop: "2px",
-          }}
-        >
-          {providerLabel} · {category}
-        </div>
-      </div>
-
-      {/* Provider toggle — only shown for models with more than one backend to choose from */}
-      {azureSupported && <ProviderToggle modelId={id} value={value} onChange={onChange} />}
+      {children}
     </div>
   );
 }
 
-/* ─── Section group ─────────────────────────────────────────────────────────── */
+function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      {...props}
+      style={{
+        width: "100%",
+        padding: "9px 12px",
+        borderRadius: 8,
+        border: "1px solid rgba(255,255,255,0.1)",
+        background: "rgba(255,255,255,0.04)",
+        color: "rgba(255,255,255,0.9)",
+        fontSize: 13,
+        outline: "none",
+        ...((props.style as object) ?? {}),
+      }}
+    />
+  );
+}
 
-function ModelGroup({
-  title,
-  accent,
-  models,
-  providers,
-  onProviderChange,
-  azureDeployments,
-  onDeploymentChange,
+function PrimaryButton({
+  children,
+  onClick,
+  disabled,
 }: {
-  title: string;
-  accent: string;
-  models: { id: string; name: string; provider: string; category: string; hasAzureDeployment?: boolean }[];
-  providers: Record<string, ProviderId>;
-  onProviderChange: (modelId: string, v: ProviderId) => void;
-  azureDeployments: Record<string, string>;
-  onDeploymentChange: (modelId: string, v: string) => void;
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <div>
-      {/* Group header */}
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
-        <span style={{ display: "inline-block", width: "6px", height: "6px", borderRadius: "50%", background: accent, flexShrink: 0 }} />
-        <span style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.08em", color: "rgba(255,255,255,0.35)", textTransform: "uppercase" }}>
-          {title}
-        </span>
-      </div>
-
-      {/* Rows */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-        {models.map((m) => (
-          <div key={m.id} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <ModelRow
-              id={m.id}
-              name={m.name}
-              providerLabel={m.provider}
-              category={m.category}
-              value={providers[m.id] ?? "kie"}
-              onChange={(v) => onProviderChange(m.id, v)}
-              azureSupported={!!m.hasAzureDeployment}
-            />
-            {/* Deployment name — shown only for Azure-capable models when Azure is selected */}
-            {m.hasAzureDeployment && (providers[m.id] ?? "kie") === "azure" && (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "6px",
-                  padding: "10px 14px",
-                  background: "rgba(96,165,250,0.04)",
-                  border: "1px solid rgba(96,165,250,0.12)",
-                  borderRadius: "10px",
-                }}
-              >
-                <label
-                  htmlFor={`azure-deploy-${m.id}`}
-                  style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}
-                >
-                  Deployment Name
-                </label>
-                <input
-                  id={`azure-deploy-${m.id}`}
-                  type="text"
-                  placeholder={`e.g. ${m.id}`}
-                  value={azureDeployments[m.id] ?? ""}
-                  onChange={(e) => onDeploymentChange(m.id, e.target.value)}
-                  style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    borderRadius: "7px",
-                    padding: "7px 11px",
-                    fontSize: "12px",
-                    color: "rgba(255,255,255,0.8)",
-                    outline: "none",
-                    fontFamily: "inherit",
-                    fontFeatureSettings: "\"tnum\"",
-                  }}
-                  onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(96,165,250,0.4)"; }}
-                  onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-                />
-                <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-                  The deployment name within your Azure resource. Combined with the global base URL above.
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: "8px 14px",
+        borderRadius: 8,
+        border: "1px solid rgba(255,255,255,0.12)",
+        background: disabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)",
+        color: disabled ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.9)",
+        fontSize: 12,
+        fontWeight: 500,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
-/* ─── API Keys panel ─────────────────────────────────────────────────────────── */
-
-const INPUT_STYLE: React.CSSProperties = {
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "7px",
-  padding: "7px 11px",
-  fontSize: "12px",
-  color: "rgba(255,255,255,0.8)",
-  outline: "none",
-  fontFamily: "inherit",
+const selectStyle: React.CSSProperties = {
+  padding: "7px 10px",
+  borderRadius: 8,
+  border: "1px solid rgba(255,255,255,0.1)",
+  background: "rgba(0,0,0,0.35)",
+  color: "rgba(255,255,255,0.85)",
+  fontSize: 12,
   width: "100%",
 };
 
-function ApiKeysPanel({
-  azureBaseUrl,
-  onBaseUrlChange,
-  kieKeyStatus,
-  onKieKeySave,
-  onKieKeyDelete,
-  azureKeyStatus,
-  onAzureKeySave,
-  onAzureKeyDelete,
-  codexStatus,
-  onCodexLoginSuccess,
+function ProfileEditor({
+  profile,
+  onChanged,
 }: {
-  azureBaseUrl: string;
-  onBaseUrlChange: (v: string) => void;
-  kieKeyStatus: "unknown" | "set" | "unset";
-  onKieKeySave: (token: string) => Promise<void>;
-  onKieKeyDelete: () => Promise<void>;
-  azureKeyStatus: "unknown" | "set" | "unset";
-  onAzureKeySave: (key: string) => Promise<void>;
-  onAzureKeyDelete: () => Promise<void>;
-  codexStatus: CodexStatus;
-  onCodexLoginSuccess: () => void;
+  profile: ProfileDetail;
+  onChanged: () => void;
 }) {
-  const [kieInput, setKieInput]       = useState("");
-  const [kieSaving, setKieSaving]     = useState(false);
-  const [kieError, setKieError]       = useState<string | null>(null);
-  const [azureInput, setAzureInput]   = useState("");
-  const [azureSaving, setAzureSaving] = useState(false);
-  const [azureError, setAzureError]   = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [name, setName] = useState(profile.name);
+  const [type, setType] = useState<ComfyProfileType>(profile.type);
+  const [mode, setMode] = useState<ComfyProfileMode>(profile.mode);
+  const [bindings, setBindings] = useState<WorkflowBindings>(profile.bindings);
+  const [checkpoint, setCheckpoint] = useState<CheckpointBinding | undefined>(profile.checkpoint);
+  const [ratiosText, setRatiosText] = useState((profile.ratios ?? []).join(", "));
+  const [durationsText, setDurationsText] = useState((profile.durations ?? []).join(", "));
+  const [nodes, setNodes] = useState(profile.nodes);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  type CodexLoginFlow =
-    | { status: "idle" }
-    | { status: "starting" }
-    | { status: "pending"; url: string; code: string }
-    | { status: "error"; error: string };
-  const [loginFlow, setLoginFlow] = useState<CodexLoginFlow>({ status: "idle" });
-  const [codeCopied, setCodeCopied] = useState(false);
-
-  const handleConnectCodex = async () => {
-    setLoginFlow({ status: "starting" });
-    try {
-      const res = await fetch("/api/settings/codex-login", { method: "POST" });
-      const d = await res.json();
-      if (d.status === "pending") setLoginFlow({ status: "pending", url: d.url, code: d.code });
-      else setLoginFlow({ status: "error", error: d.error ?? "Failed to start login" });
-    } catch (e: unknown) {
-      setLoginFlow({ status: "error", error: e instanceof Error ? e.message : "Failed to start login" });
-    }
-  };
-
-  const handleCopyCode = (code: string) => {
-    navigator.clipboard.writeText(code).then(() => {
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 1500);
-    }).catch(() => {});
-  };
-
-  /* Poll while a device-code login is pending, until it resolves */
   useEffect(() => {
-    if (loginFlow.status !== "pending") return;
-    const interval = setInterval(async () => {
+    startTransition(() => {
+      setName(profile.name);
+      setType(profile.type);
+      setMode(profile.mode);
+      setBindings(profile.bindings);
+      setCheckpoint(profile.checkpoint);
+      setRatiosText((profile.ratios ?? []).join(", "));
+      setDurationsText((profile.durations ?? []).join(", "));
+      setNodes(profile.nodes);
+    });
+  }, [profile]);
+
+  const updateBinding = (key: keyof WorkflowBindings, patch: Partial<WorkflowBinding> | null) => {
+    setBindings((prev) => {
+      const next = { ...prev };
+      if (!patch) {
+        delete next[key];
+        return next;
+      }
+      const current = prev[key] ?? { nodeId: nodes[0]?.nodeId ?? "", input: "" };
+      next[key] = { ...current, ...patch };
+      return next;
+    });
+  };
+
+  const save = async (extra?: { workflowJson?: unknown; workflowName?: string }) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const ratios = ratiosText
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const durations = durationsText
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update-profile",
+          profileId: profile.id,
+          name: extra?.workflowName || name,
+          type,
+          mode,
+          bindings,
+          checkpoint: checkpoint?.nodeId ? checkpoint : null,
+          ratios,
+          durations,
+          ...(extra?.workflowJson != null ? { workflowJson: extra.workflowJson } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to save profile");
+      if (data.profile?.nodes) setNodes(data.profile.nodes);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importFile = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const text = await file.text();
+      let json: unknown;
       try {
-        const res = await fetch("/api/settings/codex-login");
-        const d = await res.json();
-        if (d.status === "success") {
-          setLoginFlow({ status: "idle" });
-          onCodexLoginSuccess();
-        } else if (d.status === "error") {
-          // Safety net: the login-store verdict can race the credential write.
-          // Before showing a red error, confirm against codex-status (which
-          // just checks auth.json on disk) — if the login actually landed,
-          // treat it as success instead of latching an error.
-          let recovered = false;
-          try {
-            const s = await fetch("/api/settings/codex-status").then((r) => r.json());
-            if (s.ready || s.authFound) recovered = true;
-          } catch { /* fall through to error */ }
-          if (recovered) {
-            setLoginFlow({ status: "idle" });
-            onCodexLoginSuccess();
-          } else {
-            setLoginFlow({ status: "error", error: d.error ?? "Login failed" });
-          }
-        }
-        // "pending" → keep polling
-      } catch { /* network hiccup — keep polling */ }
-    }, 2500);
-    return () => clearInterval(interval);
-  }, [loginFlow.status, onCodexLoginSuccess]);
-
-  const handleKieSave = async () => {
-    if (!kieInput.trim()) return;
-    setKieSaving(true);
-    setKieError(null);
-    try {
-      await onKieKeySave(kieInput.trim());
-      setKieInput("");
-    } catch (e: unknown) {
-      setKieError(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setKieSaving(false);
+        json = JSON.parse(text);
+      } catch {
+        throw new Error("File is not valid JSON");
+      }
+      await save({ workflowJson: json, workflowName: file.name.replace(/\.json$/i, "") || name });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
     }
   };
 
-  const handleAzureSave = async () => {
-    if (!azureInput.trim()) return;
-    setAzureSaving(true);
-    setAzureError(null);
+  const remove = async () => {
+    if (!confirm(`Delete profile "${profile.name}"?`)) return;
+    setBusy(true);
+    setError(null);
     try {
-      await onAzureKeySave(azureInput.trim());
-      setAzureInput("");
-    } catch (e: unknown) {
-      setAzureError(e instanceof Error ? e.message : "Failed to save");
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete-profile", profileId: profile.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Delete failed");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setAzureSaving(false);
+      setBusy(false);
     }
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-      {/* Header */}
-      <div>
-        <h2 style={{ fontSize: "17px", fontWeight: 600, color: "rgba(255,255,255,0.9)", margin: 0, lineHeight: 1.2 }}>
-          API Keys
-        </h2>
-        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.28)", marginTop: "6px", lineHeight: 1.5 }}>
-          Your Kie.ai key is stored securely on the server — it is never exposed to the browser.
-        </p>
-      </div>
-
-      {/* ──── Kie.ai API key ──────────────────────────────────────────── */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "10px",
-          padding: "16px",
-          background: "rgba(255,255,255,0.02)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: "12px",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <span
-            style={{
-              width: "28px", height: "28px", borderRadius: "7px",
-              background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            <ProviderBrandIcon id="kie" size={16} />
-          </span>
-          <div>
-            <div style={{ fontSize: "13px", fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>Kie.ai</div>
-            <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.28)", marginTop: "1px" }}>
-              Used for all image &amp; video generation
-            </div>
-          </div>
-          {kieKeyStatus === "set" && (
-            <span
-              style={{
-                marginLeft: "auto", fontSize: "10px", fontWeight: 600,
-                color: "rgba(74,222,128,0.8)", background: "rgba(74,222,128,0.08)",
-                border: "1px solid rgba(74,222,128,0.2)", borderRadius: "5px",
-                padding: "2px 7px", letterSpacing: "0.04em",
-              }}
-            >
-              SAVED
-            </span>
-          )}
-        </div>
-
-        {kieKeyStatus === "unknown" ? (
-          <div style={{ display: "flex", gap: "8px" }}>
-            <div style={{
-              flex: 1, height: "31px", borderRadius: "7px",
-              background: "rgba(255,255,255,0.05)",
-              animation: "skeleton-pulse 1.4s ease-in-out infinite",
-            }} />
-            <div style={{
-              width: "72px", height: "31px", borderRadius: "7px",
-              background: "rgba(255,255,255,0.05)",
-              animation: "skeleton-pulse 1.4s ease-in-out infinite 0.2s",
-            }} />
-          </div>
-        ) : kieKeyStatus === "set" ? (
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <input
-              type="password"
-              value="placeholdertoken"
-              readOnly
-              style={{ ...INPUT_STYLE, flex: 1, cursor: "default", color: "rgba(255,255,255,0.3)" }}
-            />
-            <button
-              onClick={onKieKeyDelete}
-              style={{
-                padding: "7px 12px", borderRadius: "7px", border: "1px solid rgba(239,68,68,0.3)",
-                background: "rgba(239,68,68,0.06)", color: "rgba(239,68,68,0.7)",
-                cursor: "pointer", fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-              }}
-            >
-              Remove
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <input
-                type="password"
-                placeholder="Paste your Kie.ai API token"
-                value={kieInput}
-                onChange={(e) => setKieInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleKieSave(); }}
-                style={{ ...INPUT_STYLE, flex: 1 }}
-                onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.2)"; }}
-                onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-              />
-              <button
-                onClick={handleKieSave}
-                disabled={!kieInput.trim() || kieSaving}
-                style={{
-                  padding: "7px 14px", borderRadius: "7px", border: "none",
-                  background: kieInput.trim() ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)",
-                  color: kieInput.trim() ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.25)",
-                  cursor: kieInput.trim() ? "pointer" : "default",
-                  fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-                  transition: "background 140ms ease, color 140ms ease",
-                }}
-              >
-                {kieSaving ? "Saving…" : "Save"}
-              </button>
-            </div>
-            {kieError && (
-              <p style={{ fontSize: "11px", color: "rgba(239,68,68,0.7)", margin: 0 }}>{kieError}</p>
-            )}
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-              Get your token at{" "}
-              <a href="https://kie.ai/api-key" target="_blank" rel="noreferrer" style={{ color: "rgba(255,255,255,0.4)" }}>
-                kie.ai/api-key
-              </a>
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* ──── Azure Foundry API key + endpoint ────────────────────────── */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "10px",
-          padding: "16px",
-          background: "rgba(96,165,250,0.04)",
-          border: "1px solid rgba(96,165,250,0.14)",
-          borderRadius: "12px",
-        }}
-      >
-        {/* Azure logo/title row */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <span
-            style={{
-              width: "28px", height: "28px", borderRadius: "7px",
-              background: "rgba(96,165,250,0.1)", border: "1px solid rgba(96,165,250,0.2)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            <ProviderBrandIcon id="azure" size={16} />
-          </span>
-          <div>
-            <div style={{ fontSize: "13px", fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>Azure Foundry</div>
-            <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.28)", marginTop: "1px" }}>
-              API key &amp; base URL — used by all Azure-routed models
-            </div>
-          </div>
-          {azureKeyStatus === "set" && (
-            <span
-              style={{
-                marginLeft: "auto", fontSize: "10px", fontWeight: 600,
-                color: "rgba(74,222,128,0.8)", background: "rgba(74,222,128,0.08)",
-                border: "1px solid rgba(74,222,128,0.2)", borderRadius: "5px",
-                padding: "2px 7px", letterSpacing: "0.04em",
-              }}
-            >
-              SAVED
-            </span>
-          )}
-        </div>
-
-        {/* API Key */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-          <label
-            htmlFor="azure-api-key"
-            style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}
-          >
-            API Key
-          </label>
-          {azureKeyStatus === "unknown" ? (
-            <div style={{
-              height: "31px", borderRadius: "7px",
-              background: "rgba(255,255,255,0.05)",
-              animation: "skeleton-pulse 1.4s ease-in-out infinite",
-            }} />
-          ) : azureKeyStatus === "set" ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <input
-                type="password"
-                value="placeholdertoken"
-                readOnly
-                style={{ ...INPUT_STYLE, flex: 1, cursor: "default", color: "rgba(255,255,255,0.3)" }}
-              />
-              <button
-                onClick={onAzureKeyDelete}
-                style={{
-                  padding: "7px 12px", borderRadius: "7px", border: "1px solid rgba(239,68,68,0.3)",
-                  background: "rgba(239,68,68,0.06)", color: "rgba(239,68,68,0.7)",
-                  cursor: "pointer", fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-                }}
-              >
-                Remove
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <div style={{ display: "flex", gap: "8px" }}>
-                <input
-                  id="azure-api-key"
-                  type="password"
-                  placeholder="Paste your Azure Foundry API key"
-                  value={azureInput}
-                  onChange={(e) => setAzureInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleAzureSave(); }}
-                  style={{ ...INPUT_STYLE, flex: 1 }}
-                  onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(96,165,250,0.4)"; }}
-                  onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-                />
-                <button
-                  onClick={handleAzureSave}
-                  disabled={!azureInput.trim() || azureSaving}
-                  style={{
-                    padding: "7px 14px", borderRadius: "7px", border: "none",
-                    background: azureInput.trim() ? "rgba(96,165,250,0.15)" : "rgba(255,255,255,0.04)",
-                    color: azureInput.trim() ? "rgba(96,165,250,0.9)" : "rgba(255,255,255,0.25)",
-                    cursor: azureInput.trim() ? "pointer" : "default",
-                    fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-                    transition: "background 140ms ease, color 140ms ease",
-                  }}
-                >
-                  {azureSaving ? "Saving…" : "Save"}
-                </button>
-              </div>
-              {azureError && (
-                <p style={{ fontSize: "11px", color: "rgba(239,68,68,0.7)", margin: 0 }}>{azureError}</p>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Base URL */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-          <label
-            htmlFor="azure-global-base-url"
-            style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}
-          >
-            Base URL
-          </label>
-          <input
-            id="azure-global-base-url"
-            type="url"
-            placeholder="https://<resource>.cognitiveservices.azure.com"
-            value={azureBaseUrl}
-            onChange={(e) => onBaseUrlChange(e.target.value)}
-            style={INPUT_STYLE}
-            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(96,165,250,0.4)"; }}
-            onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-          />
-          <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-            Combined with per-model deployment names below.
-          </p>
-        </div>
-      </div>
-
-      {/* ──── Codex CLI status ─────────────────────────────────────────── */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "10px",
-          padding: "16px",
-          background: "rgba(74,222,128,0.04)",
-          border: "1px solid rgba(74,222,128,0.14)",
-          borderRadius: "12px",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <span
-            style={{
-              width: "28px", height: "28px", borderRadius: "7px",
-              background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.2)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            <ProviderBrandIcon id="codex" size={16} />
-          </span>
-          <div>
-            <div style={{ fontSize: "13px", fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>Codex CLI</div>
-            <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.28)", marginTop: "1px" }}>
-              Uses the server&apos;s local <code style={{ fontFamily: "monospace" }}>codex login</code> session — no per-user key
-            </div>
-          </div>
-          <span
-            style={{
-              marginLeft: "auto", fontSize: "10px", fontWeight: 600,
-              color: codexStatus.kind === "ready" ? "rgba(74,222,128,0.8)" : "rgba(251,146,60,0.8)",
-              background: codexStatus.kind === "ready" ? "rgba(74,222,128,0.08)" : "rgba(251,146,60,0.08)",
-              border: `1px solid ${codexStatus.kind === "ready" ? "rgba(74,222,128,0.2)" : "rgba(251,146,60,0.2)"}`,
-              borderRadius: "5px", padding: "2px 7px", letterSpacing: "0.04em", whiteSpace: "nowrap",
-            }}
-          >
-            {codexStatus.kind === "unknown" ? "CHECKING…" : codexStatus.kind === "ready" ? "READY" : "NOT CONFIGURED"}
-          </span>
-        </div>
-
-        {/* auth.json can exist but hold a stale/invalidated refresh token (e.g. the
-            "session has ended" 401) — the status check only sees that the file is
-            there, so it still reports READY. Offer a manual reauth escape hatch. */}
-        {codexStatus.kind === "ready" && loginFlow.status === "idle" && (
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5, flex: 1 }}>
-              Getting a &quot;session has ended&quot; or 401 error? Reauth below.
-            </p>
-            <button
-              onClick={handleConnectCodex}
-              style={{
-                padding: "7px 14px", borderRadius: "7px", border: "1px solid rgba(74,222,128,0.3)",
-                background: "rgba(74,222,128,0.1)", color: "rgba(74,222,128,0.9)",
-                cursor: "pointer", fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-              }}
-            >
-              Reauth
-            </button>
-          </div>
-        )}
-
-        {/* Starting a new login immediately invalidates any existing session on this
-            host — the CLI clears old credentials the moment a login attempt begins,
-            before the user does anything in the browser. Only offer it when auth is
-            actually missing; a missing binary alone shouldn't risk a working login. */}
-        {codexStatus.kind === "not_ready" && !codexStatus.authFound && loginFlow.status === "idle" && (
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5, flex: 1 }}>
-              Requires <a href="https://github.com/jdmnk/codex-imagegen-cli" target="_blank" rel="noreferrer" style={{ color: "rgba(255,255,255,0.4)" }}>codex-imagegen-cli</a> installed on this server. Sign in below.
-            </p>
-            <button
-              onClick={handleConnectCodex}
-              style={{
-                padding: "7px 14px", borderRadius: "7px", border: "1px solid rgba(74,222,128,0.3)",
-                background: "rgba(74,222,128,0.1)", color: "rgba(74,222,128,0.9)",
-                cursor: "pointer", fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-              }}
-            >
-              Connect Codex
-            </button>
-          </div>
-        )}
-
-        {codexStatus.kind === "not_ready" && codexStatus.authFound && !codexStatus.installed && loginFlow.status === "idle" && (
-          <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-            Signed in, but <a href="https://github.com/jdmnk/codex-imagegen-cli" target="_blank" rel="noreferrer" style={{ color: "rgba(255,255,255,0.4)" }}>codex-imagegen-cli</a> isn&apos;t installed on this server yet — image generation will fail until it is.
-          </p>
-        )}
-
-        {loginFlow.status === "starting" && (
-          <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", margin: 0 }}>Starting login…</p>
-        )}
-
-        {loginFlow.status === "pending" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px" }}>
-            <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.55)", margin: 0, lineHeight: 1.6 }}>
-              1. Open{" "}
-              <a href={loginFlow.url} target="_blank" rel="noreferrer" style={{ color: "rgba(74,222,128,0.85)" }}>
-                {loginFlow.url}
-              </a>
-              <br />
-              2. Enter this one-time code:
-            </p>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span
-                style={{
-                  fontFamily: "monospace", fontSize: "15px", fontWeight: 700, letterSpacing: "0.06em",
-                  color: "rgba(74,222,128,0.9)", background: "rgba(74,222,128,0.08)",
-                  border: "1px solid rgba(74,222,128,0.2)", borderRadius: "6px", padding: "6px 12px",
-                }}
-              >
-                {loginFlow.code}
-              </span>
-              <button
-                onClick={() => handleCopyCode(loginFlow.code)}
-                style={{
-                  padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.1)",
-                  background: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)",
-                  cursor: "pointer", fontSize: "11px", fontWeight: 500,
-                }}
-              >
-                {codeCopied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.25)", margin: 0 }}>
-              Waiting for confirmation… the code expires in 15 minutes.
-            </p>
-          </div>
-        )}
-
-        {loginFlow.status === "error" && (
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <p style={{ fontSize: "11px", color: "rgba(239,68,68,0.7)", margin: 0, flex: 1 }}>{loginFlow.error}</p>
-            <button
-              onClick={handleConnectCodex}
-              style={{
-                padding: "6px 12px", borderRadius: "7px", border: "1px solid rgba(255,255,255,0.1)",
-                background: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)",
-                cursor: "pointer", fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap",
-              }}
-            >
-              Try again
-            </button>
-          </div>
-        )}
-      </div>
-
-    </div>
-  );
-}
-
-/* ─── Provider legend (shared) ───────────────────────────────────────────────── */
-
-function ProviderLegend() {
-  return (
-    <div style={{ display: "flex", gap: "12px", padding: "12px 16px", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px" }}>
-      {PROVIDERS.map((p) => (
-        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <span style={{ width: "24px", height: "24px", borderRadius: "6px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", fontWeight: 700, color: "rgba(255,255,255,0.55)", letterSpacing: "0.02em" }}>
-            <ProviderBrandIcon id={p.id} />
-          </span>
-          <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.55)", fontWeight: 500 }}>{p.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/* ─── Image Models panel ─────────────────────────────────────────────────────── */
-
-function ImageModelsPanel({
-  providers,
-  onProviderChange,
-  azureDeployments,
-  onDeploymentChange,
-}: {
-  providers: Record<string, ProviderId>;
-  onProviderChange: (modelId: string, v: ProviderId) => void;
-  azureDeployments: Record<string, string>;
-  onDeploymentChange: (modelId: string, v: string) => void;
-}) {
-  const models = IMAGE_MODELS.map((m) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-    category: "Image",
-    hasAzureDeployment: !!m.azureSizeMap,
-  }));
+  const modesForType = PROFILE_MODES.filter((m) => m.type === type);
+  const supportsRatios = !!(bindings.width && bindings.height);
+  const supportsDuration = !!bindings.duration;
+  const ckNode = nodes.find((n) => n.nodeId === checkpoint?.nodeId);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-      <div>
-        <h2 style={{ fontSize: "17px", fontWeight: 600, color: "rgba(255,255,255,0.9)", margin: 0, lineHeight: 1.2 }}>
-          Image Models
-        </h2>
-        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.28)", marginTop: "6px", lineHeight: 1.5 }}>
-          Choose which provider serves each image model. Azure-capable models show a deployment name field when Azure is selected.
-        </p>
-      </div>
-      <ProviderLegend />
-      <ModelGroup
-        title="Image Models"
-        accent="#fb923c"
-        models={models}
-        providers={providers}
-        onProviderChange={onProviderChange}
-        azureDeployments={azureDeployments}
-        onDeploymentChange={onDeploymentChange}
-      />
-    </div>
-  );
-}
-
-/* ─── Video Models panel ─────────────────────────────────────────────────────── */
-
-function VideoModelsPanel({
-  providers,
-  onProviderChange,
-  azureDeployments,
-  onDeploymentChange,
-}: {
-  providers: Record<string, ProviderId>;
-  onProviderChange: (modelId: string, v: ProviderId) => void;
-  azureDeployments: Record<string, string>;
-  onDeploymentChange: (modelId: string, v: string) => void;
-}) {
-  const models = VIDEO_MODELS.map((m) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-    category: "Video",
-    hasAzureDeployment: false,
-  }));
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-      <div>
-        <h2 style={{ fontSize: "17px", fontWeight: 600, color: "rgba(255,255,255,0.9)", margin: 0, lineHeight: 1.2 }}>
-          Video Models
-        </h2>
-        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.28)", marginTop: "6px", lineHeight: 1.5 }}>
-          Choose which provider serves each video model.
-        </p>
-      </div>
-      <ProviderLegend />
-      <ModelGroup
-        title="Video Models"
-        accent="#5EEAD4"
-        models={models}
-        providers={providers}
-        onProviderChange={onProviderChange}
-        azureDeployments={azureDeployments}
-        onDeploymentChange={onDeploymentChange}
-      />
-    </div>
-  );
-}
-
-/* ─── Text Models panel ──────────────────────────────────────────────────────── */
-
-function TextModelsPanel({
-  azureKeyStatus,
-  azureBaseUrl,
-  azureTextDeployment,
-  azureTextModelName,
-  onDeploymentChange,
-  onModelNameChange,
-}: {
-  azureKeyStatus: "unknown" | "set" | "unset";
-  azureBaseUrl: string;
-  azureTextDeployment: string;
-  azureTextModelName: string;
-  onDeploymentChange: (v: string) => void;
-  onModelNameChange: (v: string) => void;
-}) {
-  const azureReady = azureKeyStatus === "set" && !!azureBaseUrl.trim();
-  const kieGroups = MODEL_GROUPS.filter(g => g.label !== "Azure");
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-      {/* Header */}
-      <div>
-        <h2 style={{ fontSize: "17px", fontWeight: 600, color: "rgba(255,255,255,0.9)", margin: 0, lineHeight: 1.2 }}>
-          Text Models
-        </h2>
-        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.28)", marginTop: "6px", lineHeight: 1.5 }}>
-          Configure AI text models for chat. Azure Auto uses your Azure Foundry credentials from the API Keys tab.
-        </p>
-      </div>
-
-      {/* Kie.ai models */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-        {kieGroups.map((group) => (
-          <div key={group.label}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
-              <span style={{ display: "inline-block", width: "6px", height: "6px", borderRadius: "50%", background: "#e5e5e5", flexShrink: 0 }} />
-              <span style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.08em", color: "rgba(255,255,255,0.35)", textTransform: "uppercase" }}>
-                {group.label}
-              </span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              {group.models.map((m) => (
-                <div
-                  key={m.id}
-                  style={{
-                    display: "flex", alignItems: "center", gap: "14px",
-                    padding: "11px 16px", borderRadius: "10px",
-                    background: "rgba(255,255,255,0.02)",
-                    border: "1px solid rgba(255,255,255,0.05)",
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: "13px", fontWeight: 500, color: "rgba(255,255,255,0.85)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {m.label}
-                    </div>
-                    <div style={{ fontSize: "11px", color: "rgba(255,255,255,0.28)", marginTop: "2px" }}>
-                      Kie.ai · {m.desc}
-                    </div>
-                  </div>
-                  <span style={{
-                    display: "flex", alignItems: "center", gap: "5px",
-                    padding: "3px 8px", borderRadius: "6px",
-                    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
-                    fontSize: "11px", fontWeight: 500, color: "rgba(255,255,255,0.4)",
-                    whiteSpace: "nowrap",
-                  }}>
-                    <span style={{ fontWeight: 700, color: "rgba(255,255,255,0.55)" }}>K</span>
-                    Kie.ai
-                  </span>
-                </div>
+    <div
+      style={{
+        padding: 16,
+        borderRadius: 12,
+        border: "1px solid rgba(255,255,255,0.08)",
+        background: "rgba(255,255,255,0.02)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+          <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Profile name" />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <select
+              value={type}
+              onChange={(e) => {
+                const t = e.target.value as ComfyProfileType;
+                setType(t);
+                const first = PROFILE_MODES.find((m) => m.type === t);
+                if (first) setMode(first.value);
+              }}
+              style={selectStyle}
+            >
+              <option value="image">Image</option>
+              <option value="video">Video</option>
+            </select>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as ComfyProfileMode)}
+              style={selectStyle}
+            >
+              {modesForType.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
               ))}
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+            Updated {new Date(profile.updatedAt).toLocaleString()} · {nodes.length} nodes
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <PrimaryButton disabled={busy} onClick={() => fileRef.current?.click()}>
+            {nodes.length ? "Replace JSON" : "Import API JSON"}
+          </PrimaryButton>
+          <PrimaryButton disabled={busy} onClick={() => void save()}>
+            {busy ? "Saving…" : "Save"}
+          </PrimaryButton>
+          <PrimaryButton disabled={busy} onClick={() => void remove()}>
+            Delete
+          </PrimaryButton>
+        </div>
+      </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="application/json,.json"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void importFile(f);
+          e.target.value = "";
+        }}
+      />
+
+      {nodes.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <FieldLabel>Bindings</FieldLabel>
+          {BINDING_FIELDS.map(({ key, label }) => {
+            const b = bindings[key];
+            const node = nodes.find((n) => n.nodeId === b?.nodeId);
+            return (
+              <div
+                key={key}
+                style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr", gap: 8, alignItems: "center" }}
+              >
+                <span style={{ fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{label}</span>
+                <select
+                  value={b?.nodeId ?? ""}
+                  onChange={(e) => {
+                    const nodeId = e.target.value;
+                    if (!nodeId) {
+                      updateBinding(key, null);
+                      return;
+                    }
+                    const n = nodes.find((x) => x.nodeId === nodeId);
+                    updateBinding(key, { nodeId, input: n?.inputs[0] ?? "text" });
+                  }}
+                  style={selectStyle}
+                >
+                  <option value="">— none —</option>
+                  {nodes.map((n) => (
+                    <option key={n.nodeId} value={n.nodeId}>
+                      #{n.nodeId} {n.title}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={b?.input ?? ""}
+                  disabled={!b?.nodeId}
+                  onChange={(e) => updateBinding(key, { input: e.target.value })}
+                  style={selectStyle}
+                >
+                  <option value="">— input —</option>
+                  {(node?.inputs ?? []).map((inp) => (
+                    <option key={inp} value={inp}>
+                      {inp}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+
+          <FieldLabel>Checkpoint (optional)</FieldLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <select
+              value={checkpoint?.nodeId ?? ""}
+              onChange={(e) => {
+                const nodeId = e.target.value;
+                if (!nodeId) {
+                  setCheckpoint(undefined);
+                  return;
+                }
+                const n = nodes.find((x) => x.nodeId === nodeId);
+                setCheckpoint({
+                  nodeId,
+                  input: n?.inputs[0] ?? "ckpt_name",
+                  value: checkpoint?.value ?? "",
+                });
+              }}
+              style={selectStyle}
+            >
+              <option value="">— none —</option>
+              {nodes.map((n) => (
+                <option key={n.nodeId} value={n.nodeId}>
+                  #{n.nodeId} {n.title}
+                </option>
+              ))}
+            </select>
+            <select
+              value={checkpoint?.input ?? ""}
+              disabled={!checkpoint?.nodeId}
+              onChange={(e) =>
+                setCheckpoint((prev) => (prev ? { ...prev, input: e.target.value } : prev))
+              }
+              style={selectStyle}
+            >
+              <option value="">— input —</option>
+              {(ckNode?.inputs ?? []).map((inp) => (
+                <option key={inp} value={inp}>
+                  {inp}
+                </option>
+              ))}
+            </select>
+            <TextInput
+              value={String(checkpoint?.value ?? "")}
+              disabled={!checkpoint?.nodeId}
+              placeholder="ckpt / model name"
+              onChange={(e) =>
+                setCheckpoint((prev) => (prev ? { ...prev, value: e.target.value } : prev))
+              }
+            />
+          </div>
+
+          {supportsRatios && (
+            <div>
+              <FieldLabel>Aspect ratios (comma-separated)</FieldLabel>
+              <TextInput
+                value={ratiosText}
+                onChange={(e) => setRatiosText(e.target.value)}
+                placeholder="1:1, 16:9, 9:16"
+              />
+            </div>
+          )}
+          {supportsDuration && (
+            <div>
+              <FieldLabel>Durations in seconds (comma-separated)</FieldLabel>
+              <TextInput
+                value={durationsText}
+                onChange={(e) => setDurationsText(e.target.value)}
+                placeholder="4, 5, 6, 8, 10"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 12, color: "rgba(248,113,113,0.95)" }}>{error}</div>}
+    </div>
+  );
+}
+
+function LocalProvidersPanel() {
+  const setComfyAvailable = useWorkflowStore((s) => s.setComfyAvailable);
+  const setOllamaAvailable = useWorkflowStore((s) => s.setOllamaAvailable);
+
+  const [state, setState] = useState<LocalProvidersState | null>(null);
+  const [comfyUrl, setComfyUrl] = useState("");
+  const [ollamaUrl, setOllamaUrlLocal] = useState("");
+  const [ollamaModel, setOllamaModelLocal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const createFileRef = useRef<HTMLInputElement>(null);
+  const [createType, setCreateType] = useState<ComfyProfileType>("image");
+  const [createMode, setCreateMode] = useState<ComfyProfileMode>("text-to-image");
+
+  const load = useCallback(async () => {
+    const res = await fetch("/api/settings/local-providers");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "Failed to load settings");
+    setState(data);
+    setComfyUrl(data.comfyuiUrl ?? "");
+    setOllamaUrlLocal(data.ollamaUrl ?? "");
+    setOllamaModelLocal(data.ollamaModel ?? "");
+    setComfyAvailable(!!data.status?.comfyui);
+    setOllamaAvailable(!!data.status?.ollama);
+  }, [setComfyAvailable, setOllamaAvailable]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time remote load
+    void load().catch((e) => {
+      startTransition(() => setError(e instanceof Error ? e.message : String(e)));
+    });
+  }, [load]);
+
+  const saveUrls = async () => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save-urls", comfyuiUrl: comfyUrl, ollamaUrl: ollamaUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to save URLs");
+      setMessage("URLs saved");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async (which: "comfyui" | "ollama") => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ test: which, comfyuiUrl: comfyUrl, ollamaUrl: ollamaUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Test failed");
+      setMessage(data.ok ? `${which} is reachable` : `${which} is unreachable`);
+      if (which === "comfyui") setComfyAvailable(!!data.ok);
+      if (which === "ollama") setOllamaAvailable(!!data.ok);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveModel = async (model: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save-ollama-model", ollamaModel: model }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to save model");
+      setOllamaModelLocal(model);
+      setMessage(`Default chat model set to ${model}`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createFromFile = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const text = await file.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error("File is not valid JSON");
+      }
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create-profile",
+          name: file.name.replace(/\.json$/i, "") || "New profile",
+          type: createType,
+          mode: createMode,
+          workflowJson: json,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to create profile");
+      setMessage(`Created profile "${data.profile?.name ?? "profile"}"`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const moveProfile = async (id: string, dir: -1 | 1) => {
+    const list = state?.profiles ?? [];
+    const idx = list.findIndex((p) => p.id === id);
+    if (idx < 0) return;
+    const j = idx + dir;
+    if (j < 0 || j >= list.length) return;
+    const ordered = list.map((p) => p.id);
+    const tmp = ordered[idx];
+    ordered[idx] = ordered[j];
+    ordered[j] = tmp;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/settings/local-providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reorder-profiles", orderedIds: ordered }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Reorder failed");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state && !error) {
+    return <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>Loading…</div>;
+  }
+
+  const createModes = PROFILE_MODES.filter((m) => m.type === createType);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+      <div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.92)", marginBottom: 6 }}>
+          Local providers
+        </div>
+        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.45)", lineHeight: 1.45 }}>
+          Connect ComfyUI for image and video generation, and Ollama for chat. Workflows must be exported in ComfyUI API Format.
+        </div>
+      </div>
+
+      <section style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <StatusDot ok={state?.status.comfyui ?? null} />
+          <span style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>ComfyUI</span>
+        </div>
+        <div>
+          <FieldLabel>Base URL</FieldLabel>
+          <TextInput value={comfyUrl} onChange={(e) => setComfyUrl(e.target.value)} placeholder="http://host.docker.internal:8188" />
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <PrimaryButton disabled={busy} onClick={() => void test("comfyui")}>Test connection</PrimaryButton>
+          <PrimaryButton disabled={busy} onClick={() => void saveUrls()}>Save URLs</PrimaryButton>
+        </div>
+      </section>
+
+      <section style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <StatusDot ok={state?.status.ollama ?? null} />
+          <span style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>Ollama</span>
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", lineHeight: 1.45 }}>
+          Ollama powers chat only. Image and video generation use ComfyUI profiles below.
+        </div>
+        <div>
+          <FieldLabel>Base URL</FieldLabel>
+          <TextInput value={ollamaUrl} onChange={(e) => setOllamaUrlLocal(e.target.value)} placeholder="http://host.docker.internal:11434" />
+        </div>
+        <div>
+          <FieldLabel>Default chat model</FieldLabel>
+          <select
+            value={ollamaModel}
+            onChange={(e) => void saveModel(e.target.value)}
+            disabled={busy || !(state?.ollamaModels.length)}
+            style={{
+              width: "100%",
+              padding: "9px 12px",
+              borderRadius: 8,
+              border: "1px solid rgba(255,255,255,0.1)",
+              background: "rgba(255,255,255,0.04)",
+              color: "rgba(255,255,255,0.9)",
+              fontSize: 13,
+            }}
+          >
+            <option value="">Select a model…</option>
+            {(state?.ollamaModels ?? []).map((m) => (
+              <option key={m.id} value={m.id}>{m.name}</option>
+            ))}
+          </select>
+          {!(state?.ollamaModels.length) && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,0.35)" }}>
+              No models listed — run ollama pull &lt;model&gt;, then refresh.
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <PrimaryButton disabled={busy} onClick={() => void test("ollama")}>Test connection</PrimaryButton>
+          <PrimaryButton disabled={busy} onClick={() => void load()}>Refresh</PrimaryButton>
+        </div>
+      </section>
+
+      <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>
+          Local model profiles
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", lineHeight: 1.45 }}>
+          Each profile maps a ComfyUI API-format workflow to image or video generation. Gallery uses these profiles as the model list.
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            alignItems: "center",
+            padding: 12,
+            borderRadius: 10,
+            border: "1px dashed rgba(255,255,255,0.12)",
+          }}
+        >
+          <select
+            value={createType}
+            onChange={(e) => {
+              const t = e.target.value as ComfyProfileType;
+              setCreateType(t);
+              const first = PROFILE_MODES.find((m) => m.type === t);
+              if (first) setCreateMode(first.value);
+            }}
+            style={{ ...selectStyle, width: "auto", minWidth: 100 }}
+          >
+            <option value="image">Image</option>
+            <option value="video">Video</option>
+          </select>
+          <select
+            value={createMode}
+            onChange={(e) => setCreateMode(e.target.value as ComfyProfileMode)}
+            style={{ ...selectStyle, width: "auto", minWidth: 140 }}
+          >
+            {createModes.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
+          <PrimaryButton disabled={busy} onClick={() => createFileRef.current?.click()}>
+            New profile (import JSON)
+          </PrimaryButton>
+          <input
+            ref={createFileRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void createFromFile(f);
+              e.target.value = "";
+            }}
+          />
+        </div>
+
+        {(state?.profiles ?? []).length === 0 && (
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>
+            No profiles yet. Import a ComfyUI API Format workflow to create one.
+          </div>
+        )}
+
+        {(state?.profiles ?? []).map((p, i) => (
+          <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 8 }}>
+              <PrimaryButton disabled={busy || i === 0} onClick={() => void moveProfile(p.id, -1)}>↑</PrimaryButton>
+              <PrimaryButton
+                disabled={busy || i === (state?.profiles.length ?? 0) - 1}
+                onClick={() => void moveProfile(p.id, 1)}
+              >
+                ↓
+              </PrimaryButton>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <ProfileEditor profile={p} onChanged={() => void load()} />
             </div>
           </div>
         ))}
-      </div>
+      </section>
 
-      {/* Azure Auto card */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "14px",
-          padding: "16px",
-          background: "rgba(96,165,250,0.04)",
-          border: "1px solid rgba(96,165,250,0.14)",
-          borderRadius: "12px",
-        }}
-      >
-        {/* Header row */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <span
-            style={{
-              width: "28px", height: "28px", borderRadius: "7px",
-              background: "rgba(96,165,250,0.1)", border: "1px solid rgba(96,165,250,0.2)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: "11px", fontWeight: 700, color: "rgba(96,165,250,0.85)",
-            }}
-          >
-            Az
-          </span>
-          <div>
-            <div style={{ fontSize: "13px", fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>Azure Auto</div>
-            <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.28)", marginTop: "1px" }}>
-              Model-router — automatically selects the best model for each request
-            </div>
-          </div>
-          <span
-            style={{
-              marginLeft: "auto", fontSize: "10px", fontWeight: 600,
-              color: azureReady ? "rgba(74,222,128,0.8)" : "rgba(251,146,60,0.8)",
-              background: azureReady ? "rgba(74,222,128,0.08)" : "rgba(251,146,60,0.08)",
-              border: `1px solid ${azureReady ? "rgba(74,222,128,0.2)" : "rgba(251,146,60,0.2)"}`,
-              borderRadius: "5px", padding: "2px 7px", letterSpacing: "0.04em", whiteSpace: "nowrap",
-            }}
-          >
-            {azureReady ? "READY" : "NOT CONFIGURED"}
-          </span>
+      {(message || error) && (
+        <div style={{ fontSize: 12, color: error ? "rgba(248,113,113,0.95)" : "rgba(74,222,128,0.9)" }}>
+          {error ?? message}
         </div>
-
-        {/* Status notice if not ready */}
-        {!azureReady && (
-          <div
-            style={{
-              padding: "10px 12px",
-              background: "rgba(251,146,60,0.05)",
-              border: "1px solid rgba(251,146,60,0.15)",
-              borderRadius: "8px",
-              fontSize: "11px",
-              color: "rgba(251,146,60,0.7)",
-              lineHeight: 1.5,
-            }}
-          >
-            {azureKeyStatus !== "set"
-              ? "Add your Azure Foundry API key in the API Keys tab to enable this model."
-              : "Add your Azure Foundry Base URL in the API Keys tab to enable this model."}
-          </div>
-        )}
-
-        {/* Two-column grid: Model Name + Deployment */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-          {/* Model Name */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-            <label
-              htmlFor="azure-text-model-name"
-              style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}
-            >
-              Model Name
-            </label>
-            <input
-              id="azure-text-model-name"
-              type="text"
-              placeholder="model-router"
-              value={azureTextModelName}
-              onChange={(e) => onModelNameChange(e.target.value)}
-              style={{
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: "7px",
-                padding: "7px 11px",
-                fontSize: "12px",
-                color: "rgba(255,255,255,0.8)",
-                outline: "none",
-                fontFamily: "inherit",
-              }}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(96,165,250,0.4)"; }}
-              onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-            />
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-              Passed as <code style={{ fontFamily: "monospace" }}>model</code> in the request body.
-            </p>
-          </div>
-
-          {/* Deployment */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-            <label
-              htmlFor="azure-text-deployment"
-              style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}
-            >
-              Deployment
-            </label>
-            <input
-              id="azure-text-deployment"
-              type="text"
-              placeholder="auto-model"
-              value={azureTextDeployment}
-              onChange={(e) => onDeploymentChange(e.target.value)}
-              style={{
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: "7px",
-                padding: "7px 11px",
-                fontSize: "12px",
-                color: "rgba(255,255,255,0.8)",
-                outline: "none",
-                fontFamily: "inherit",
-              }}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(96,165,250,0.4)"; }}
-              onBlur={(e)  => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-            />
-            <p style={{ fontSize: "10px", color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
-              Used in the URL path <code style={{ fontFamily: "monospace" }}>/deployments/{"{deployment}"}</code>.
-            </p>
-          </div>
-        </div>
-
-        {/* API version (read-only) */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-          <span style={{ fontSize: "11px", fontWeight: 600, color: "rgba(96,165,250,0.7)", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            API Version
-          </span>
-          <div style={{ padding: "7px 11px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "7px", fontSize: "12px", color: "rgba(255,255,255,0.4)", fontFamily: "monospace" }}>
-            2024-04-01-preview
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
-
-/* ─── Debug panel ───────────────────────────────────────────────────────────── */
 
 function DebugPanel() {
-  const debugMode     = useWorkflowStore((s) => s.debugMode);
-  const toggleDebug   = useWorkflowStore((s) => s.toggleDebug);
-
+  const [debugMode, setDebugMode] = useState(false);
+  useEffect(() => {
+    try {
+      const on = localStorage.getItem("aiui-debug-mode") === "1";
+      startTransition(() => setDebugMode(on));
+    } catch { /* noop */ }
+  }, []);
+  const toggle = () => {
+    const next = !debugMode;
+    setDebugMode(next);
+    try { localStorage.setItem("aiui-debug-mode", next ? "1" : "0"); } catch { /* noop */ }
+  };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <div>
-        <h2 style={{ fontSize: "15px", fontWeight: 600, color: "rgba(255,255,255,0.9)", margin: 0, marginBottom: "4px" }}>Debug</h2>
-        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.35)", margin: 0 }}>
-          Only visible when <code style={{ fontFamily: "monospace", color: "rgba(251,146,60,0.8)" }}>NEXT_PUBLIC_DEBUG=true</code>
-        </p>
-      </div>
-
-      {/* Simulate generation */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", padding: "14px 16px", borderRadius: "10px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-          <span style={{ fontSize: "13px", fontWeight: 500, color: "rgba(255,255,255,0.85)" }}>Simulate generation</span>
-          <span style={{ fontSize: "11px", color: "rgba(255,255,255,0.35)", lineHeight: 1.5 }}>
-            Skip the real API call — fake a 5-second generation and log the payload to the server console.
-          </span>
-        </div>
-        <button
-          onClick={toggleDebug}
-          style={{
-            flexShrink: 0,
-            width: "40px",
-            height: "22px",
-            borderRadius: "11px",
-            border: "none",
-            cursor: "pointer",
-            padding: "2px",
-            background: debugMode ? "rgba(251,146,60,0.8)" : "rgba(255,255,255,0.12)",
-            transition: "background 200ms",
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          <div style={{
-            width: "18px",
-            height: "18px",
-            borderRadius: "50%",
-            background: "#fff",
-            transform: debugMode ? "translateX(18px)" : "translateX(0px)",
-            transition: "transform 200ms cubic-bezier(0.34,1.56,0.64,1)",
-            boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
-          }} />
-        </button>
-      </div>
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.92)", marginBottom: 8 }}>Debug</div>
+      <button
+        type="button"
+        onClick={toggle}
+        style={{
+          padding: "8px 14px",
+          borderRadius: 8,
+          border: "1px solid rgba(255,255,255,0.12)",
+          background: debugMode ? "rgba(251,146,60,0.25)" : "rgba(255,255,255,0.06)",
+          color: "rgba(255,255,255,0.85)",
+          cursor: "pointer",
+          fontSize: 13,
+        }}
+      >
+        Dry-run generation: {debugMode ? "ON" : "OFF"}
+      </button>
     </div>
   );
 }
 
-/* ─── Main modal ─────────────────────────────────────────────────────────────── */
-
 export default function SettingsModal({ onClose }: SettingsModalProps) {
-  const [activeNav, setActiveNav]             = useState<NavId>("api-keys");
-  const [modelProviders, setModelProviders]   = useState<Record<string, ProviderId>>({});
-  const [azureDeployments, setAzureDeployments] = useState<Record<string, string>>({});
-  const [azureBaseUrl, setAzureBaseUrl]               = useState("");
-  const [azureTextDeployment, setAzureTextDeployment] = useState("auto-model");
-  const [azureTextModelName, setAzureTextModelName]   = useState("model-router");
-  const [kieKeyStatus, setKieKeyStatus]               = useState<"unknown" | "set" | "unset">("unknown");
-  const [azureKeyStatus, setAzureKeyStatus]   = useState<"unknown" | "set" | "unset">("unknown");
-  const [codexStatus, setCodexStatus]         = useState<CodexStatus>({ kind: "unknown" });
-  const setKieKeySet    = useWorkflowStore((s) => s.setKieKeySet);
-  const setAzureKeySet  = useWorkflowStore((s) => s.setAzureKeySet);
+  const [activeNav, setActiveNav] = useState<NavId>("local-providers");
   const overlayRef = useRef<HTMLDivElement>(null);
 
-  async function authHeader(): Promise<Record<string, string>> {
-    return {};
-  }
-
-  const refreshCodexStatus = useCallback(() => {
-    fetch("/api/settings/codex-status")
-      .then((r) => r.json())
-      .then((d: { ready: boolean; installed: boolean; authFound: boolean }) =>
-        setCodexStatus(d.ready ? { kind: "ready" } : { kind: "not_ready", installed: d.installed, authFound: d.authFound })
-      )
-      .catch(() => setCodexStatus({ kind: "not_ready", installed: false, authFound: false }));
-  }, []);
-
-  /* Load persisted data on mount */
-  useEffect(() => {
-    setModelProviders(loadModelProviders());
-    setAzureDeployments(loadAzureEndpoints());
-    setAzureBaseUrl(loadAzureBaseUrl());
-    setAzureTextDeployment(loadAzureTextDeployment());
-    setAzureTextModelName(loadAzureTextModelName());
-    // Check if Kie key is saved on the server
-    authHeader().then((h) =>
-      fetch("/api/settings/kie-key", { headers: h })
-        .then((r) => r.json())
-        .then((d) => setKieKeyStatus(d.hasToken ? "set" : "unset"))
-        .catch(() => setKieKeyStatus("unset"))
-    );
-    // Check if Azure key is saved on the server
-    authHeader().then((h) =>
-      fetch("/api/settings/azure-key", { headers: h })
-        .then((r) => r.json())
-        .then((d) => setAzureKeyStatus(d.hasToken ? "set" : "unset"))
-        .catch(() => setAzureKeyStatus("unset"))
-    );
-    // Check whether the server has a working codex-imagegen + codex login
-    refreshCodexStatus();
-  }, [refreshCodexStatus]);
-
-  /* Close on Escape */
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  /* Close on backdrop click */
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === overlayRef.current) onClose();
-  };
-
-  const handleProviderChange = (modelId: string, v: ProviderId) => {
-    const next = { ...modelProviders, [modelId]: v };
-    saveModelProviders(next);
-    setModelProviders(next);
-  };
-
-  const handleDeploymentChange = (modelId: string, v: string) => {
-    setAzureDeployments((prev) => {
-      const next = { ...prev, [modelId]: v };
-      saveAzureEndpoints(next);
-      return next;
-    });
-  };
-
-  const handleBaseUrlChange = (v: string) => {
-    setAzureBaseUrl(v);
-    saveAzureBaseUrl(v);
-  };
-
-  const handleKieKeySave = async (token: string) => {
-    const h = await authHeader();
-    const res = await fetch("/api/settings/kie-key", {
-      method: "POST",
-      headers: { ...h, "Content-Type": "application/json" },
-      body: JSON.stringify({ kieApiToken: token }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error ?? "Failed to save");
-    setKieKeyStatus("set");
-    setKieKeySet(true);
-  };
-
-  const handleKieKeyDelete = async () => {
-    const h = await authHeader();
-    await fetch("/api/settings/kie-key", { method: "DELETE", headers: h });
-    setKieKeyStatus("unset");
-    setKieKeySet(false);
-  };
-
-  const handleAzureKeySave = async (key: string) => {
-    const h = await authHeader();
-    const res = await fetch("/api/settings/azure-key", {
-      method: "POST",
-      headers: { ...h, "Content-Type": "application/json" },
-      body: JSON.stringify({ azureApiKey: key }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error ?? "Failed to save");
-    setAzureKeyStatus("set");
-    setAzureKeySet(true);
-  };
-
-  const handleAzureKeyDelete = async () => {
-    const h = await authHeader();
-    await fetch("/api/settings/azure-key", { method: "DELETE", headers: h });
-    setAzureKeyStatus("unset");
-    setAzureKeySet(false);
-  };
-
-  const handleAzureTextDeploymentChange = (v: string) => {
-    setAzureTextDeployment(v);
-    saveAzureTextDeployment(v);
-  };
-
-  const handleAzureTextModelNameChange = (v: string) => {
-    setAzureTextModelName(v);
-    saveAzureTextModelName(v);
-  };
+  const nav: { id: NavId; label: string }[] = [
+    { id: "local-providers", label: "Local providers" },
+    ...(IS_DEBUG ? [{ id: "debug" as const, label: "Debug" }] : []),
+  ];
 
   return (
     <>
-      {/* ── Keyframe animations ── */}
       <style>{`
-        @keyframes settingsOverlayIn {
-          from { opacity: 0; }
-          to   { opacity: 1; }
-        }
+        @keyframes settingsOverlayIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes settingsModalIn {
           from { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
-          to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-        }
-        @keyframes skeleton-pulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.4; }
+          to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
         }
       `}</style>
-
-      {/* ── Backdrop ── */}
       <div
         ref={overlayRef}
-        onClick={handleOverlayClick}
+        onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
         style={{
-          position: "fixed",
-          inset: 0,
-          zIndex: 9999,
+          position: "fixed", inset: 0, zIndex: 9999,
           background: "rgba(0, 0, 0, 0.65)",
-          backdropFilter: "blur(4px)",
-          WebkitBackdropFilter: "blur(4px)",
+          backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
           animation: "settingsOverlayIn 180ms ease both",
         }}
       />
-
-      {/* ── Modal shell ── */}
       <div
         id="settings-modal"
         style={{
-          position: "fixed",
-          left: "50%",
-          top: "50%",
-          transform: "translate(-50%, -50%)",
-          zIndex: 10000,
-          width: "min(75vw, 960px)",
-          height: "min(75vh, 680px)",
-          display: "flex",
-          borderRadius: "18px",
+          position: "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)",
+          zIndex: 10000, width: "min(75vw, 960px)", height: "min(75vh, 680px)",
+          display: "flex", borderRadius: "18px",
           background: "rgba(10, 11, 14, 0.98)",
           border: "1px solid rgba(255,255,255,0.08)",
           boxShadow: "0 32px 80px rgba(0,0,0,0.8), 0 4px 20px rgba(0,0,0,0.5)",
@@ -1517,120 +882,48 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           animation: "settingsModalIn 220ms cubic-bezier(0.22,1,0.36,1) both",
         }}
       >
-        {/* ── Left sidebar ── */}
-        <div
-          style={{
-            width: "200px",
-            flexShrink: 0,
-            borderRight: "1px solid rgba(255,255,255,0.06)",
-            display: "flex",
-            flexDirection: "column",
-            padding: "20px 12px",
-            gap: "2px",
-          }}
-        >
-          {/* Title */}
-          <div
-            style={{
-              fontSize: "14px",
-              fontWeight: 600,
-              color: "rgba(255,255,255,0.6)",
-              padding: "4px 10px 14px",
-              letterSpacing: "0.01em",
-            }}
-          >
+        <div style={{
+          width: 200, flexShrink: 0, borderRight: "1px solid rgba(255,255,255,0.06)",
+          display: "flex", flexDirection: "column", padding: "20px 12px", gap: 2,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "rgba(255,255,255,0.6)", padding: "4px 10px 14px" }}>
             Settings
           </div>
-
-          {/* Nav items */}
-          {NAV.map((item) => {
+          {nav.map((item) => {
             const isActive = activeNav === item.id;
             return (
               <button
                 key={item.id}
                 id={`settings-nav-${item.id}`}
+                type="button"
                 onClick={() => setActiveNav(item.id)}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "9px",
-                  padding: "8px 10px",
-                  borderRadius: "8px",
-                  border: "none",
-                  cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 9, padding: "8px 10px",
+                  borderRadius: 8, border: "none", cursor: "pointer",
                   background: isActive ? "rgba(255,255,255,0.07)" : "transparent",
                   color: isActive ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.4)",
-                  fontSize: "13px",
-                  fontWeight: isActive ? 500 : 400,
-                  textAlign: "left",
-                  transition: "background 130ms ease, color 130ms ease",
-                  width: "100%",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isActive) {
-                    (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)";
-                    (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.6)";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!isActive) {
-                    (e.currentTarget as HTMLButtonElement).style.background = "transparent";
-                    (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.4)";
-                  }
+                  fontSize: 13, fontWeight: isActive ? 500 : 400, textAlign: "left", width: "100%",
                 }}
               >
-                <span style={{ opacity: isActive ? 1 : 0.6, flexShrink: 0 }}>{item.icon}</span>
                 {item.label}
               </button>
             );
           })}
         </div>
-
-        {/* ── Right content ── */}
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            minWidth: 0,
-            overflow: "hidden",
-          }}
-        >
-          {/* Top bar */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              padding: "16px 20px",
-              borderBottom: "1px solid rgba(255,255,255,0.05)",
-              flexShrink: 0,
-            }}
-          >
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "flex-end",
+            padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,0.05)", flexShrink: 0,
+          }}>
             <button
               id="settings-close"
+              type="button"
               onClick={onClose}
               title="Close (Esc)"
               style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: "28px",
-                height: "28px",
-                borderRadius: "7px",
-                border: "none",
-                cursor: "pointer",
-                background: "rgba(255,255,255,0.05)",
-                color: "rgba(255,255,255,0.4)",
-                transition: "background 130ms ease, color 130ms ease",
-              }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.1)";
-                (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.8)";
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.05)";
-                (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.4)";
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28, height: 28, borderRadius: 7, border: "none", cursor: "pointer",
+                background: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.4)",
               }}
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -1638,55 +931,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
               </svg>
             </button>
           </div>
-
-          {/* Scrollable body */}
-          <div
-            style={{
-              flex: 1,
-              overflowY: "auto",
-              padding: "28px 28px 40px",
-            }}
-          >
-            {activeNav === "api-keys" && (
-              <ApiKeysPanel
-                azureBaseUrl={azureBaseUrl}
-                onBaseUrlChange={handleBaseUrlChange}
-                kieKeyStatus={kieKeyStatus}
-                onKieKeySave={handleKieKeySave}
-                onKieKeyDelete={handleKieKeyDelete}
-                azureKeyStatus={azureKeyStatus}
-                onAzureKeySave={handleAzureKeySave}
-                onAzureKeyDelete={handleAzureKeyDelete}
-                codexStatus={codexStatus}
-                onCodexLoginSuccess={refreshCodexStatus}
-              />
-            )}
-            {activeNav === "image-models" && (
-              <ImageModelsPanel
-                providers={modelProviders}
-                onProviderChange={handleProviderChange}
-                azureDeployments={azureDeployments}
-                onDeploymentChange={handleDeploymentChange}
-              />
-            )}
-            {activeNav === "video-models" && (
-              <VideoModelsPanel
-                providers={modelProviders}
-                onProviderChange={handleProviderChange}
-                azureDeployments={azureDeployments}
-                onDeploymentChange={handleDeploymentChange}
-              />
-            )}
-            {activeNav === "text-models" && (
-              <TextModelsPanel
-                azureKeyStatus={azureKeyStatus}
-                azureBaseUrl={azureBaseUrl}
-                azureTextDeployment={azureTextDeployment}
-                azureTextModelName={azureTextModelName}
-                onDeploymentChange={handleAzureTextDeploymentChange}
-                onModelNameChange={handleAzureTextModelNameChange}
-              />
-            )}
+          <div style={{ flex: 1, overflowY: "auto", padding: "28px 28px 40px" }}>
+            {activeNav === "local-providers" && <LocalProvidersPanel />}
             {activeNav === "debug" && IS_DEBUG && <DebugPanel />}
           </div>
         </div>

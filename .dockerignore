@@ -1,0 +1,13 @@
+.git
+.github
+.next
+node_modules
+data
+public/generated
+.env
+.env.*
+!.env.example
+src-tauri/target
+coverage
+test-results
+*.log

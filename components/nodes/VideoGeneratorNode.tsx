@@ -10,7 +10,8 @@ import { useWorkflowStore, NodeData } from "@/lib/store";
 import { resolveInputs } from "@/lib/executor";
 import { useReadOnly } from "@/lib/readOnlyContext";
 import { ShieldBan } from "lucide-react";
-import { VIDEO_MODELS as VIDEO_MODEL_CFG } from "@/lib/modelConfig";
+import type { VideoModel } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
 import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation";
 import MissingInputWarning from "./MissingInputWarning";
 
@@ -157,7 +158,9 @@ function resolveMentions(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function VideoGeneratorNode({ id, data, selected }: NodeProps<VideoGeneratorNodeType>) {
+export default function VideoGeneratorNode({
+ id, data, selected }: NodeProps<VideoGeneratorNodeType>) {
+  const { videoModels: VIDEO_MODEL_CFG } = useComfyProfiles();
   const readOnly = useReadOnly();
   const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
   const updateNodeSize = useWorkflowStore((s) => s.updateNodeSize);

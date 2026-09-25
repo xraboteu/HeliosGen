@@ -153,11 +153,15 @@ interface WorkflowStore {
   addToast:    (message: string, type?: Toast["type"], href?: string, title?: string, preview?: string) => void;
   removeToast: (id: string) => void;
 
-  // ── Kie key status (null = unknown, true = set, false = not set)
+  // ── Local provider reachability (null = unknown)
+  comfyAvailable:     boolean | null;
+  setComfyAvailable:  (v: boolean | null) => void;
+  ollamaAvailable:    boolean | null;
+  setOllamaAvailable: (v: boolean | null) => void;
+
+  /** @deprecated alias — generation gated on ComfyUI */
   kieKeySet:    boolean | null;
   setKieKeySet: (v: boolean | null) => void;
-
-  // ── Azure key status (null = unknown, true = set, false = not set)
   azureKeySet:    boolean | null;
   setAzureKeySet: (v: boolean | null) => void;
 
@@ -695,9 +699,13 @@ export const useWorkflowStore = create<WorkflowStore>()(
         removeToast: (id) =>
           set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
-        kieKeySet:    null,
-        setKieKeySet: (v) => set({ kieKeySet: v }),
+        comfyAvailable:     null,
+        setComfyAvailable:  (v) => set({ comfyAvailable: v, kieKeySet: v }),
+        ollamaAvailable:    null,
+        setOllamaAvailable: (v) => set({ ollamaAvailable: v }),
 
+        kieKeySet:    null,
+        setKieKeySet: (v) => set({ kieKeySet: v, comfyAvailable: v }),
         azureKeySet:    null,
         setAzureKeySet: (v) => set({ azureKeySet: v }),
 

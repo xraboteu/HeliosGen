@@ -4,7 +4,7 @@ import NextImage from "next/image";
 import { Handle, Position, NodeProps, Node, useReactFlow, useUpdateNodeInternals } from "@xyflow/react";
 import CornerResizer from "./CornerResizer";
 import { useWorkflowStore, NodeData } from "@/lib/store";
-import { VIDEO_MODELS } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
 import { sha256Hex } from "@/lib/assetHash";
 
 type VideoInputNodeType = Node<NodeData, "videoInputNode">;
@@ -30,7 +30,9 @@ const VIDEO_SOURCE_HANDLE_SPACING = 32; // px between source handles
 // while every handle keeps its own slot, so edges don't jump when a handle hides.
 const videoSourceHandleCenterOffset = (i: number) => (i - (VIDEO_SOURCE_HANDLES.length - 1) / 2) * VIDEO_SOURCE_HANDLE_SPACING;
 
-export default function VideoInputNode({ id, data, selected }: NodeProps<VideoInputNodeType>) {
+export default function VideoInputNode({
+ id, data, selected }: NodeProps<VideoInputNodeType>) {
+  const { videoModels: VIDEO_MODELS } = useComfyProfiles();
   const updateNodeData  = useWorkflowStore((s) => s.updateNodeData);
   const edges           = useWorkflowStore((s) => s.edges);
   const nodes           = useWorkflowStore((s) => s.nodes);

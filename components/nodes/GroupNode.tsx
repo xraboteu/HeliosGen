@@ -6,7 +6,7 @@ import { useReadOnly } from "@/lib/readOnlyContext";
 import { arrangeNodes } from "@/lib/arrangeNodes";
 import { usePipelineRunner } from "@/lib/usePipelineRunner";
 import { makeZip } from "@/lib/makeZip";
-import { VIDEO_MODELS } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
 
 export type GroupNodeType = Node<NodeData, "groupNode">;
 
@@ -168,7 +168,9 @@ function InlineWarning({ messages }: { messages: string[] }) {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
-export default function GroupNode({ id, data, selected }: NodeProps<GroupNodeType>) {
+export default function GroupNode({
+ id, data, selected }: NodeProps<GroupNodeType>) {
+  const { videoModels: VIDEO_MODELS } = useComfyProfiles();
   const readOnly = useReadOnly();
   const updateNodeData  = useWorkflowStore((s) => s.updateNodeData);
   const updateNodeSize  = useWorkflowStore((s) => s.updateNodeSize);
@@ -220,7 +222,7 @@ export default function GroupNode({ id, data, selected }: NodeProps<GroupNodeTyp
         if (!promptConnected) missingInputs.push("A text node is required");
       } else {
         const videoModelId = (genNode.data.videoModel as string) ?? "kling-3.0";
-        const cfg = VIDEO_MODELS.find((m) => m.id === videoModelId) ?? VIDEO_MODELS[0];
+        const cfg = VIDEO_MODELS.find((m) => m.id === videoModelId) ?? VIDEO_MODELS[0] ?? { id: "", handles: ["prompt"] as const, name: "", provider: "ComfyUI", ratios: [], durations: [], defaultDuration: 5, defaultRatio: "16:9", sound: false, apiInput: { durationMin: 0, durationMax: 0 } };
         if (!cfg.promptOptional && !promptConnected) missingInputs.push("A text node is required");
       }
 

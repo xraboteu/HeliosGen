@@ -29,7 +29,7 @@ export const useChatSessionStore = create<ChatSessionState>()(
   persist(
     (set) => ({
       sessions: [],
-      preferredModel: "claude-sonnet-4-6",
+      preferredModel: "",
 
       setPreferredModel: (model) => set({ preferredModel: model }),
 

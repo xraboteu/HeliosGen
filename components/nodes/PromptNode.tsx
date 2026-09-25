@@ -6,7 +6,7 @@ import {
 import { createPortal } from "react-dom";
 import { Handle, Position, NodeProps, Node, useViewport } from "@xyflow/react";
 import { useWorkflowStore, NodeData } from "@/lib/store";
-import { IMAGE_MODELS, VIDEO_MODELS } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
 import { thumbSrc } from "@/lib/galleryUtils";
 import { useReadOnly } from "@/lib/readOnlyContext";
 import { detectTextMode } from "@/lib/textFormat";
@@ -85,7 +85,9 @@ function renderWithMentions(
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function PromptNode({ id, data, selected }: NodeProps<PromptNodeType>) {
+export default function PromptNode({
+ id, data, selected }: NodeProps<PromptNodeType>) {
+  const { imageModels: IMAGE_MODELS, videoModels: VIDEO_MODELS } = useComfyProfiles();
   const readOnly = useReadOnly();
   const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
   const onNodesChange = useWorkflowStore((s) => s.onNodesChange);
@@ -163,13 +165,13 @@ export default function PromptNode({ id, data, selected }: NodeProps<PromptNodeT
       .find((n) => n?.type === "generateNode" || n?.type === "videoGeneratorNode");
     if (!target) return null;
     if (target.type === "generateNode") {
-      const m = IMAGE_MODELS.find((m) => m.id === ((target.data?.model as string) ?? "nano-banana-2"));
+      const m = IMAGE_MODELS.find((m) => m.id === ((target.data?.model as string) ?? IMAGE_MODELS[0]?.id));
       if (!m) return null;
       const hasImages = edges.some((e) => e.target === target.id && e.targetHandle === "image");
       if (!hasImages && m.textOnlyPromptMaxLength) return m.textOnlyPromptMaxLength;
       return m.apiInput.promptMaxLength;
     }
-    const m = VIDEO_MODELS.find((m) => m.id === ((target.data?.videoModel as string) ?? "kling-3.0"));
+    const m = VIDEO_MODELS.find((m) => m.id === ((target.data?.videoModel as string) ?? VIDEO_MODELS[0]?.id));
     return m?.apiInput.promptMaxLength ?? null;
   })();
 

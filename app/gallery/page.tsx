@@ -2,8 +2,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { createPortal } from "react-dom";
-import { IMAGE_MODELS, VIDEO_MODELS, AZURE_POPULAR_SIZES, validateAzureCustomSize } from "@/lib/modelConfig";
-import { PROVIDERS, getModelProvider, setModelProvider, modelHasProviderChoice } from "@/lib/providers";
+import { imageModelsFromProfiles, videoModelsFromProfiles, type ImageModel, type VideoModel } from "@/lib/modelConfig";
+import type { ComfyModelProfile } from "@/lib/providers/types";
 import { useWorkflowStore } from "@/lib/store";
 import { Maximize2, Minimize2, ShieldAlert, X } from "lucide-react";
 
@@ -318,14 +318,8 @@ function saveSettings(tab: Tab, folderId: string | null, s: SavedSettings) {
 }
 
 /** Whether Azure is fully configured (provider + base URL + deployment) for a given model. */
-function isAzureActiveForModel(modelId: string, azureResolutionOptions?: string[]): boolean {
-  if (typeof window === "undefined" || !azureResolutionOptions?.length) return false;
-  try {
-    const provider = JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[modelId] ?? "kie";
-    const base     = localStorage.getItem("aiui-azure-base-url") ?? "";
-    const deploy   = JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[modelId] ?? "";
-    return provider === "azure" && !!base && !!deploy;
-  } catch { return false; }
+function isAzureActiveForModel(_modelId: string, _azureResolutionOptions?: string[]): boolean {
+  return false;
 }
 
 function loadKlingElements(): KlingElement[] {
@@ -417,8 +411,8 @@ function PendingGenTile({ pg, onCancel }: { pg: PendingGen; onCancel: () => void
 
 // ── Logged-out empty state ────────────────────────────────────────────────────
 
-const CYCLE_NAMES = ["Nano Banana Pro", "GPT Image 2", "Nano Banana 2"];
-const VIDEO_CYCLE_NAMES = ["Seedance 2.0", "Kling 3.0", "Happy Horse"];
+const CYCLE_NAMES = ["ComfyUI Image", "Local Profile", "Text to Image"];
+const VIDEO_CYCLE_NAMES = ["ComfyUI Video", "Local Profile", "Text to Video"];
 const EMPTY_IMGS = ["/1.webp", "/2.webp", "/3.webp", "/4.webp"];
 
 function EmptyFan({ blur }: { blur?: boolean }) {
@@ -613,7 +607,11 @@ function GalleryInner() {
   const preDragSelectedIdsRef = useRef<Set<string>>(new Set());
 
   const isVideo = tab === "videos";
-  const models = isVideo ? VIDEO_MODELS : IMAGE_MODELS;
+  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
+  const [videoModels, setVideoModels] = useState<VideoModel[]>([]);
+  const models = isVideo ? videoModels : imageModels;
+  const setSettingsOpen = useWorkflowStore((s) => s.setSettingsOpen);
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
 
   const skipNextModelEffect = useRef(false);
 
@@ -622,24 +620,47 @@ function GalleryInner() {
   const settingsSnapshotRef = useRef<SavedSettings | null>(null);
   const [modelId, setModelId] = useState<string>(() => {
     const s = loadSettings(tab, selectedFolderId);
-    return (s?.modelId && models.find(m => m.id === s.modelId)) ? s.modelId : models[0].id;
+    return s?.modelId ?? "";
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/local-providers");
+        const data = await res.json();
+        if (!res.ok || cancelled) return;
+        const profiles = (data.profiles ?? []) as Array<
+          Pick<ComfyModelProfile, "id" | "name" | "type" | "mode" | "bindings" | "ratios" | "durations">
+        >;
+        const imgs = imageModelsFromProfiles(profiles);
+        const vids = videoModelsFromProfiles(profiles);
+        setImageModels(imgs);
+        setVideoModels(vids);
+        setProfilesLoaded(true);
+        const list = tab === "videos" ? vids : imgs;
+        setModelId((prev) => {
+          if (prev && list.some((m) => m.id === prev)) return prev;
+          const saved = loadSettings(tab, selectedFolderId)?.modelId;
+          if (saved && list.some((m) => m.id === saved)) return saved;
+          return list[0]?.id ?? "";
+        });
+      } catch {
+        if (!cancelled) setProfilesLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
   const [aspectRatio, setAspectRatio] = useState<string>(() => {
     const s = loadSettings(tab, selectedFolderId);
-    const mId = (s?.modelId && models.find(m => m.id === s.modelId)) ? s.modelId : models[0].id;
-    const mdl = models.find(m => m.id === mId) ?? models[0];
-    const azureOpts = (mdl as { azureResolutionOptions?: string[] }).azureResolutionOptions;
-    if (s?.aspectRatio === "custom" && Number.isFinite(s.azureCustomWidth) && Number.isFinite(s.azureCustomHeight) && isAzureActiveForModel(mId, azureOpts)) {
-      return "custom";
-    }
-    if (s?.aspectRatio && mdl.ratios.includes(s.aspectRatio)) return s.aspectRatio;
-    return ("defaultRatio" in mdl ? (mdl as { defaultRatio: string }).defaultRatio : null) ?? mdl.ratios[0] ?? "1:1";
+    return s?.aspectRatio && s.aspectRatio !== "custom" ? s.aspectRatio : "1:1";
   });
   const [azureCustomWidth, setAzureCustomWidth] = useState<number | undefined>(() => loadSettings(tab, selectedFolderId)?.azureCustomWidth);
   const [azureCustomHeight, setAzureCustomHeight] = useState<number | undefined>(() => loadSettings(tab, selectedFolderId)?.azureCustomHeight);
   const [quality, setQuality] = useState<string>(() => loadSettings(tab, selectedFolderId)?.quality ?? "2k");
   const [isAzureProvider, setIsAzureProvider] = useState<boolean>(false);
-  const [providerId, setProviderId] = useState<ReturnType<typeof getModelProvider>>("kie");
+  const [providerId] = useState("comfyui");
   const [count, setCount] = useState<number>(() => loadSettings(tab, selectedFolderId)?.count ?? 1);
   const [duration, setDuration] = useState<number>(() => loadSettings(tab, selectedFolderId)?.duration ?? 5);
   const [mode, setMode] = useState<string>(() => loadSettings(tab, selectedFolderId)?.mode ?? "");
@@ -1071,9 +1092,9 @@ function GalleryInner() {
       if (cached) { setItems(cached.items); setHasMore(cached.hasMore); } else setItems([]);
       if (user) loadItems(tab, 0, true);
     }
-    const newModels = tab === "videos" ? VIDEO_MODELS : IMAGE_MODELS;
+    const newModels = tab === "videos" ? videoModels : imageModels;
     const saved = loadSettings(tab, prevFolderIdRef.current);
-    const model = (saved?.modelId ? newModels.find(m => m.id === saved.modelId) : null) ?? newModels[0];
+    const model = (saved?.modelId ? newModels.find(m => m.id === saved.modelId) : null) ?? newModels[0] ?? { id: "", ratios: ["1:1"], name: "", provider: "ComfyUI" } as ImageModel & VideoModel;
     const azureOpts = (model as { azureResolutionOptions?: string[] }).azureResolutionOptions;
     const savedIsCustom = saved?.aspectRatio === "custom" && Number.isFinite(saved.azureCustomWidth) && Number.isFinite(saved.azureCustomHeight) && isAzureActiveForModel(model.id, azureOpts);
     const savedAR = savedIsCustom ? "custom" : (saved?.aspectRatio && model.ratios.includes(saved.aspectRatio) ? saved.aspectRatio : null);
@@ -1161,31 +1182,20 @@ function GalleryInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId]);
 
-  // Keep isAzureProvider in sync with localStorage whenever model or provider settings change
+  // Keep quality options synced for the selected model (Azure backends removed).
   useEffect(() => {
     const m = models.find(m => m.id === modelId);
-    const im = m as { azureQualityOptions?: string[] } | undefined;
+    const im = m as { azureQualityOptions?: string[]; apiInput?: { qualityOptions?: string[] } } | undefined;
     const read = () => {
       try {
-        const provider = getModelProvider(modelId);
-        setProviderId(provider);
-        const base     = localStorage.getItem("aiui-azure-base-url") ?? "";
-        const deploy   = JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[modelId] ?? "";
-        const azure    = provider === "azure" && !!base && !!deploy && !!im?.azureQualityOptions;
-        setIsAzureProvider(azure);
+        setIsAzureProvider(false);
         if (!isVideo && im) {
-          const validQ = azure ? (im.azureQualityOptions ?? []) : ((m as { apiInput?: { qualityOptions?: string[] } })?.apiInput?.qualityOptions ?? []);
+          const validQ = im.apiInput?.qualityOptions ?? [];
           if (validQ.length) setQuality(prev => validQ.includes(prev) ? prev : validQ[0]);
         }
       } catch { setIsAzureProvider(false); }
     };
     read();
-    window.addEventListener("storage", read);
-    window.addEventListener("aiui-providers-changed", read);
-    return () => {
-      window.removeEventListener("storage", read);
-      window.removeEventListener("aiui-providers-changed", read);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId, isVideo]);
 
@@ -1259,8 +1269,8 @@ function GalleryInner() {
     prevFolderIdRef.current = selectedFolderId;
     // Load settings for the new folder
     const saved = loadSettings(tab, selectedFolderId);
-    const newModels = tab === "videos" ? VIDEO_MODELS : IMAGE_MODELS;
-    const model = (saved?.modelId ? newModels.find(m => m.id === saved.modelId) : null) ?? newModels[0];
+    const newModels = tab === "videos" ? videoModels : imageModels;
+    const model = (saved?.modelId ? newModels.find(m => m.id === saved.modelId) : null) ?? newModels[0] ?? { id: "", ratios: ["1:1"], name: "", provider: "ComfyUI" } as ImageModel & VideoModel;
     const azureOpts = (model as { azureResolutionOptions?: string[] }).azureResolutionOptions;
     const savedIsCustom = saved?.aspectRatio === "custom" && Number.isFinite(saved.azureCustomWidth) && Number.isFinite(saved.azureCustomHeight) && isAzureActiveForModel(model.id, azureOpts);
     const savedAR = savedIsCustom ? "custom" : (saved?.aspectRatio && model.ratios.includes(saved.aspectRatio) ? saved.aspectRatio : null);
@@ -1347,12 +1357,12 @@ function GalleryInner() {
 
   // ── Image upload ──────────────────────────────────────────────────────────
 
-  const imgModel = IMAGE_MODELS.find(m => m.id === modelId);
+  const imgModel = imageModels.find(m => m.id === modelId);
   const maxImgs = imgModel?.maxImages ?? 0;
   const canAddImgs = !isVideo && !!imgModel?.supportsImages && refImages.length < maxImgs;
   const promptMaxLength = (() => {
     if (isVideo) {
-      const vm = VIDEO_MODELS.find(m => m.id === modelId);
+      const vm = videoModels.find(m => m.id === modelId);
       return vm?.apiInput.promptMaxLength ?? null;
     }
     if (!imgModel) return null;
@@ -1429,7 +1439,7 @@ function GalleryInner() {
     target: "startFrame" | "endFrame" | "resource" | "videoRef" | "referenceVideo" | "audioRef",
   ) => {
     if (!files || files.length === 0) return;
-    const vm = VIDEO_MODELS.find(m => m.id === modelId);
+    const vm = videoModels.find(m => m.id === modelId);
     const isSingle = target === "startFrame" || target === "endFrame" || target === "videoRef";
 
     const maxCount = isSingle ? 1 : (
@@ -1629,24 +1639,10 @@ function GalleryInner() {
       const refUrls = imgModel?.supportsImages ? refImages.filter(r => r.cdnUrl && !r.error && !extraUrlSet.has(r.cdnUrl!)).map(r => r.cdnUrl!) : [];
       const imageUrls = imgModel?.supportsImages ? [...new Set([...extraUrls, ...refUrls])] : [];
 
-      // Read provider settings from localStorage (same keys as GenerateNode)
-      const azureBaseUrl    = (() => { try { return localStorage.getItem("aiui-azure-base-url") ?? ""; } catch { return ""; } })();
-      const azureDeployment = (() => { try { return JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[modelId] ?? ""; } catch { return ""; } })();
-      const providerForModel = (() => { try { return JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[modelId] ?? "kie"; } catch { return "kie"; } })();
-      const isAzure = !!(azureBaseUrl && azureDeployment && providerForModel === "azure");
-      const isCodex = providerForModel === "codex";
-
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          prompt: resolvedPrompt, model: modelId, aspectRatio, quality, imageUrls,
-          ...(isAzure ? {
-            azureBaseUrl, azureDeployment, azureQuality: quality, azureResolution,
-            ...(aspectRatio === "custom" ? { azureCustomWidth, azureCustomHeight } : {}),
-          } : {}),
-          ...(isCodex ? { codexProvider: true } : {}),
-        }),
+        body: JSON.stringify({ prompt: resolvedPrompt, aspectRatio, imageUrls, profileId: modelId }),
       });
       const text = await res.text();
       let d: { taskId?: string; error?: string } = {};
@@ -1654,7 +1650,7 @@ function GalleryInner() {
       if (!res.ok) throw new Error(d.error ?? `Server error ${res.status}`);
       return d.taskId!;
     } else {
-      const vm = VIDEO_MODELS.find(m => m.id === modelId);
+      const vm = videoModels.find(m => m.id === modelId);
       const handles = vm?.handles ?? [];
 
       const { resolvedPrompt, extraAssets } = resolveGalleryMentions(effectivePrompt, taggedImages, vm?.resourceTagFormat ?? "default");
@@ -1726,31 +1722,13 @@ function GalleryInner() {
       const res = await fetch("/api/generate-video", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(isVeo ? {
-          model: modelId,
-          prompt: resolvedPrompt,
-          aspect_ratio: aspectRatio,
-          generationType,
-          imageUrls: veoImageUrls,
-          enableTranslation: true,
-          enableFallback: false,
-          watermark: "",
-        } : {
-          videoModel: modelId,
+        body: JSON.stringify({
+          profileId: modelId,
           prompt: resolvedPrompt,
           aspectRatio,
           duration,
-          ...(vm?.sound ? { sound } : {}),
-          ...(vm?.modes?.length ? { mode: mode || vm.defaultMode || "pro" } : {}),
-          resolution: vm && "resolutions" in vm && vm.resolutions?.length ? resolution || vm.defaultResolution : undefined,
-          ...(startFrameUrl               ? { startFrameUrl }               : {}),
-          ...(endFrameUrl                 ? { endFrameUrl }                 : {}),
-          ...(videoRefUrl                 ? { videoRefUrl }                 : {}),
-          ...(klingElements?.length       ? { klingElements }               : {}),
-          ...(referenceImageUrls?.length  ? { referenceImageUrls }          : {}),
-          ...(referenceVideoUrls?.length  ? { referenceVideoUrls }          : {}),
-          ...(referenceAudioUrls?.length  ? { referenceAudioUrls }          : {}),
-          ...(vm?.supportsSeeds && seed ? { seed } : {}),
+          ...(startFrameUrl ? { startFrameUrl } : {}),
+          ...(seed !== undefined ? { seed } : {}),
         }),
       });
       const text = await res.text();
@@ -1792,7 +1770,7 @@ function GalleryInner() {
       setGenError("References still uploading…"); setTimeout(() => setGenError(""), 3_000); return;
     }
     if (isVideo) {
-      const vm = VIDEO_MODELS.find(m => m.id === modelId);
+      const vm = videoModels.find(m => m.id === modelId);
       if (vm?.requiredHandles?.length) {
         const handleHasContent = (h: string) => {
           if (h === "resource")        return vidResources.some(r => r.cdnUrl && !r.error);
@@ -1840,14 +1818,10 @@ function GalleryInner() {
 
     // ── Debug mode: log + simulate, no real API call ────────────────────────
     if (debugMode) {
-      const dbgVm = isVideo ? VIDEO_MODELS.find(m => m.id === modelId) : undefined;
+      const dbgVm = isVideo ? videoModels.find(m => m.id === modelId) : undefined;
       const { resolvedPrompt: dbgPrompt, extraUrls: dbgExtra, extraAssets: dbgAssets } = resolveGalleryMentions(prompt, taggedImages, dbgVm?.resourceTagFormat ?? "default");
       const dbgExtraSet = new Set(dbgExtra);
       const dbgRefUrls = refImages.filter(r => r.cdnUrl && !r.error && !dbgExtraSet.has(r.cdnUrl!)).map(r => r.cdnUrl!);
-      const dbgAzureBaseUrl    = (() => { try { return localStorage.getItem("aiui-azure-base-url") ?? ""; } catch { return ""; } })();
-      const dbgAzureDeployment = (() => { try { return JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[modelId] ?? ""; } catch { return ""; } })();
-      const dbgProvider        = (() => { try { return JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[modelId] ?? "kie"; } catch { return "kie"; } })();
-      const dbgIsAzure = !!(dbgAzureBaseUrl && dbgAzureDeployment && dbgProvider === "azure");
       const dbgTaggedImageUrls = dbgAssets.filter(a => a.kind === "image").map(a => a.url);
       const dbgTaggedVideoUrls = dbgAssets.filter(a => a.kind === "video").map(a => a.url);
       const dbgTaggedAudioUrls = dbgAssets.filter(a => a.kind === "audio").map(a => a.url);
@@ -1857,11 +1831,7 @@ function GalleryInner() {
       console.log("[Gallery Debug] Generate request:", {
         type: isVideo ? "video" : "image",
         prompt: dbgPrompt, model: modelId, aspectRatio, quality,
-        provider: dbgIsAzure ? "azure" : "kie",
-        ...(dbgIsAzure ? {
-          azureBaseUrl: dbgAzureBaseUrl, azureDeployment: dbgAzureDeployment, azureQuality: quality, azureResolution,
-          ...(aspectRatio === "custom" ? { azureCustomWidth, azureCustomHeight } : {}),
-        } : {}),
+        provider: "comfyui",
         ...(isVideo ? {
           duration, mode,
           startFrameUrl:       vidStartFrame?.cdnUrl ?? null,
@@ -2176,14 +2146,12 @@ function GalleryInner() {
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
-  const vidModel = VIDEO_MODELS.find(m => m.id === modelId);
+  const vidModel = videoModels.find(m => m.id === modelId);
   const ratios = (isVideo ? vidModel?.ratios : imgModel?.ratios) ?? [];
-  const supportsQ = !isVideo && !!imgModel?.supportsQuality;
+  const supportsQ = false;
 
-  const qualityOpts: string[] = isAzureProvider
-    ? (imgModel!.azureQualityOptions ?? [])
-    : (imgModel?.apiInput.qualityOptions ?? ["2k", "4k"]);
-  const azureResolutionOpts: string[] = isAzureProvider ? (imgModel?.azureResolutionOptions ?? []) : [];
+  const qualityOpts: string[] = [];
+  const azureResolutionOpts: string[] = [];
   const durations = vidModel?.durations ?? [];
   const vidModes = vidModel?.modes ?? [];
   const activeModel = models.find(m => m.id === modelId);
@@ -2198,7 +2166,8 @@ function GalleryInner() {
   const displayVidRefAudios = getDisplayOrder(vidRefAudios, draggingId, reorderOverId);
 
   const vidRequiresPrompt = isVideo && !!(vidModel?.apiInput.promptMaxLength);
-  const canGenerate = kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
+  const noProfiles = profilesLoaded && models.length === 0;
+  const canGenerate = noProfiles || !modelId ? false : kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
 
   const handleAddReference = useCallback((url: string) => {
     if (refImages.some(r => r.cdnUrl === url || r.objectUrl === url)) {
@@ -2303,7 +2272,7 @@ function GalleryInner() {
       // Use the source model's handles (meta.model), not the currently-selected model.
       // setModelId runs after this block so modelId is stale here.
       const targetModelId = meta?.model ?? modelId;
-      const vm = VIDEO_MODELS.find(m => m.id === targetModelId) ?? VIDEO_MODELS.find(m => m.id === modelId);
+      const vm = videoModels.find(m => m.id === targetModelId) ?? videoModels.find(m => m.id === modelId);
       const handles = vm?.handles ?? [];
       const useElements = !!(vm?.apiInput.useKlingElements);
 
@@ -2349,7 +2318,7 @@ function GalleryInner() {
     setTaggedImages(tagged);
     setPrompt(processedText);
     if (meta?.model) {
-      const knownModels = tab === "videos" ? VIDEO_MODELS : IMAGE_MODELS;
+      const knownModels = tab === "videos" ? videoModels : imageModels;
       if (knownModels.some(m => m.id === meta.model)) setModelId(meta.model);
     }
     if (meta?.aspectRatio) setAspectRatio(meta.aspectRatio);
@@ -2883,7 +2852,7 @@ function GalleryInner() {
                                 let taskId: string;
                                 try {
                                   if (retryIsVideo) {
-                                    const vm = VIDEO_MODELS.find(m => m.id === modelId);
+                                    const vm = videoModels.find(m => m.id === modelId);
                                     const isVeo = !!(vm?.apiInput.useGoogleVeo);
                                     const res = await fetch("/api/generate-video", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(isVeo ? {
                                       model: modelId, prompt: pg.prompt, aspect_ratio: pg.aspectRatio, generationType: "TEXT_2_VIDEO",
@@ -2900,12 +2869,7 @@ function GalleryInner() {
                                     const { resolvedPrompt, extraUrls } = resolveGalleryMentions(pg.prompt, syntheticTagged);
                                     const dedupedExtra = new Set(extraUrls);
                                     const imageUrls = [...extraUrls, ...storedRefs.filter(u => !dedupedExtra.has(u))];
-                                    const azureBaseUrl    = (() => { try { return localStorage.getItem("aiui-azure-base-url") ?? ""; } catch { return ""; } })();
-                                    const azureDeployment = (() => { try { return JSON.parse(localStorage.getItem("aiui-azure-endpoints") ?? "{}")[modelId] ?? ""; } catch { return ""; } })();
-                                    const providerForModel = (() => { try { return JSON.parse(localStorage.getItem("aiui-model-providers") ?? "{}")[modelId] ?? "kie"; } catch { return "kie"; } })();
-                                    const isAzure = !!(azureBaseUrl && azureDeployment && providerForModel === "azure");
-                                    const isCodex = providerForModel === "codex";
-                                    const res = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ prompt: resolvedPrompt, model: modelId, aspectRatio: pg.aspectRatio, quality, imageUrls, ...(isAzure ? { azureBaseUrl, azureDeployment, azureQuality: quality } : {}), ...(isCodex ? { codexProvider: true } : {}) }) });
+                                    const res = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ prompt: resolvedPrompt, aspectRatio: pg.aspectRatio, imageUrls }) });
                                     const d = await res.json() as { taskId?: string; error?: string };
                                     if (!res.ok) throw new Error(d.error ?? "Failed");
                                     taskId = d.taskId!;
@@ -4042,22 +4006,10 @@ function GalleryInner() {
                   options={models.map(m => ({
                     value: m.id,
                     label: m.name,
-                    group: ("provider" in m ? (m as { provider: string }).provider : undefined),
-                    providerIcon: "provider" in m ? <ProviderIcon provider={(m as { provider: string }).provider} /> : undefined,
+                    group: "ComfyUI",
                   }))}
                   showChevron
                 />
-
-                {/* Backend picker — only for models with more than one backend to choose from */}
-                {modelHasProviderChoice(modelId) && (
-                  <CustomDropdown
-                    value={providerId}
-                    onChange={(v) => setModelProvider(modelId, v as (typeof PROVIDERS)[number]["id"])}
-                    disabled={submitting}
-                    options={PROVIDERS.map(p => ({ value: p.id, label: p.label, providerIcon: <ProviderBackendIcon id={p.id} /> }))}
-                    showChevron
-                  />
-                )}
 
                 {/* Quality */}
                 {supportsQ && (
@@ -4414,6 +4366,23 @@ function GalleryInner() {
 
               {/* Character count + Generate button */}
               <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
+                {noProfiles && (
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    style={{
+                      fontSize: 11,
+                      color: "rgba(251,146,60,0.95)",
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      textDecoration: "underline",
+                      padding: 0,
+                    }}
+                  >
+                    No {isVideo ? "video" : "image"} profiles — open Settings
+                  </button>
+                )}
                 {promptMaxLength !== null && !multiPromptMode && (
                   <div
                     aria-hidden
@@ -5462,7 +5431,7 @@ function AspectRatioDropdown({
                 />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", marginBottom: "8px" }}>
-                {AZURE_POPULAR_SIZES.map(p => (
+                {([] as { label: string; width: number; height: number }[]).map(p => (
                   <button
                     key={p.label}
                     onClick={() => { setWidthDraft(p.width); setHeightDraft(p.height); setCustomError(null); }}
@@ -5491,7 +5460,7 @@ function AspectRatioDropdown({
               )}
               <button
                 onClick={() => {
-                  const err = validateAzureCustomSize(widthDraft, heightDraft);
+                  const err = ((_w: number, _h: number) => null as string | null)(widthDraft, heightDraft);
                   if (err) { setCustomError(err); return; }
                   onApplyCustom(widthDraft, heightDraft);
                   setOpen(false);
@@ -5587,7 +5556,7 @@ function RatioPreview({ ratio }: { ratio: string }) {
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
 /** Backend brand mark for the Kie.ai/Azure Foundry/Codex CLI picker — distinct from ProviderIcon's model-brand icons. */
-function ProviderBackendIcon({ id }: { id: (typeof PROVIDERS)[number]["id"] }) {
+function ProviderBackendIcon({ id }: { id: string }) {
   if (id === "kie") {
     return (
       <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "14px", height: "14px", fontSize: "11px", fontWeight: 700 }}>

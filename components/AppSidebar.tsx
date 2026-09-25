@@ -652,16 +652,6 @@ function LogoIcon() {
   return <Image src="/HG.svg" alt="Logo" width={26} height={26} />;
 }
 
-function CreditIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-      <circle cx="12" cy="12" r="9" />
-      <circle cx="12" cy="12" r="3.5" />
-    </svg>
-  );
-}
-
 // ── Sidebar component ─────────────────────────────────────────────────────────
 export function AppSidebar() {
   const pathname = usePathname();
@@ -670,40 +660,34 @@ export function AppSidebar() {
   const tab = searchParams.get("tab") ?? "images";
   const activeChatId = searchParams.get("id");
 
-  const [balance, setBalance] = React.useState<number | null>(null);
+  const [comfyOk, setComfyOk] = React.useState<boolean | null>(null);
+  const [ollamaOk, setOllamaOk] = React.useState<boolean | null>(null);
 
-  const setSettingsOpen   = useWorkflowStore((s) => s.setSettingsOpen);
-  const setKieKeySet      = useWorkflowStore((s) => s.setKieKeySet);
-  const setAzureKeySet    = useWorkflowStore((s) => s.setAzureKeySet);
-
-  React.useEffect(() => {
-    fetch("/api/settings/kie-key")
-      .then((r) => r.json())
-      .then((d) => setKieKeySet(!!d.hasToken))
-      .catch(() => setKieKeySet(null));
-    fetch("/api/settings/azure-key")
-      .then((r) => r.json())
-      .then((d) => setAzureKeySet(!!d.hasToken))
-      .catch(() => setAzureKeySet(null));
-  }, [setKieKeySet, setAzureKeySet]);
+  const setSettingsOpen     = useWorkflowStore((s) => s.setSettingsOpen);
+  const setComfyAvailable   = useWorkflowStore((s) => s.setComfyAvailable);
+  const setOllamaAvailable  = useWorkflowStore((s) => s.setOllamaAvailable);
 
   React.useEffect(() => {
-    const fetchBalance = async () => {
+    const refresh = async () => {
       try {
-        const res = await fetch("/api/credit");
+        const res = await fetch("/api/settings/local-providers");
         if (!res.ok) return;
         const data = await res.json();
-        const val = typeof data?.data === "number"
-          ? data.data
-          : (data?.data?.balance ?? data?.balance ?? null);
-        setBalance(val);
-      } catch { /* ignore */ }
+        const c = !!data.status?.comfyui;
+        const o = !!data.status?.ollama;
+        setComfyOk(c);
+        setOllamaOk(o);
+        setComfyAvailable(c);
+        setOllamaAvailable(o);
+      } catch {
+        setComfyAvailable(null);
+        setOllamaAvailable(null);
+      }
     };
-    fetchBalance();
-    const id = setInterval(fetchBalance, 60_000);
-    window.addEventListener("credits-refresh", fetchBalance);
-    return () => { clearInterval(id); window.removeEventListener("credits-refresh", fetchBalance); };
-  }, []);
+    void refresh();
+    const id = setInterval(refresh, 60_000);
+    return () => clearInterval(id);
+  }, [setComfyAvailable, setOllamaAvailable]);
 
   const { sessions, deleteSession } = useChatSessionStore();
 
@@ -978,7 +962,7 @@ export function AppSidebar() {
         <GitHubButtons />
         <DropdownMenu>
 
-          {/* Trigger: pixel avatar + name + credits */}
+          {/* Trigger: pixel avatar + name + provider status */}
           <DropdownMenuTrigger
             render={
               <button
@@ -996,8 +980,15 @@ export function AppSidebar() {
                 <div className="flex-1 text-left group-data-[collapsible=icon]:hidden min-w-0">
                   {displayName && <div className="text-[13px] font-semibold text-white/90 truncate leading-tight">{displayName}</div>}
                   <div className="flex items-center gap-1 mt-0.5 text-[11px] text-white/40">
-                    <CreditIcon />
-                    <span>{balance !== null ? `${balance.toLocaleString()} Credits` : "0 Credits"}</span>
+                    <span>
+                      {comfyOk === false
+                        ? "ComfyUI offline"
+                        : ollamaOk === false
+                          ? "Ollama offline"
+                          : comfyOk && ollamaOk
+                            ? "Local providers ready"
+                            : "Checking providers…"}
+                    </span>
                   </div>
                 </div>
                 <MoreHorizontal size={15} className="text-white/30 shrink-0 group-data-[collapsible=icon]:hidden" />
@@ -1021,23 +1012,12 @@ export function AppSidebar() {
               </Avatar>
               <div className="min-w-0">
                 {displayName && <div className="text-[15px] font-semibold text-white truncate">{displayName}</div>}
-                <div className="flex items-center gap-1.5 mt-0.5 text-[12px] text-white/40">
-                  <CreditIcon size={13} />
-                  <span>{balance !== null ? `${balance.toLocaleString()} Credits` : "0 Credits"}</span>
+                <div className="mt-0.5 text-[12px] text-white/40">
+                  ComfyUI {comfyOk ? "online" : comfyOk === false ? "offline" : "…"} · Ollama{" "}
+                  {ollamaOk ? "online" : ollamaOk === false ? "offline" : "…"}
                 </div>
               </div>
             </div>
-
-            <DropdownMenuSeparator className="!bg-white/[0.07] !my-0 !mx-0" />
-
-            {/* Purchase Kie Credits */}
-            <DropdownMenuItem
-              className="flex items-center justify-between rounded-none px-4 py-3 text-[14px] text-white/60 hover:text-white focus:text-white focus:bg-white/[0.06] cursor-pointer"
-              onClick={() => window.open("https://kie.ai?ref=25abb3f2236cbff9780ab9c2f84479ec", "_blank")}
-            >
-              <span>Purchase Kie Credits</span>
-              <CreditIcon size={15} />
-            </DropdownMenuItem>
 
             <DropdownMenuSeparator className="!bg-white/[0.07] !my-0 !mx-0" />
 

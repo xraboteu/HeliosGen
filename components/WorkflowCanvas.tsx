@@ -19,7 +19,7 @@ import "@xyflow/react/dist/style.css";
 
 import { useWorkflowStore, NodeData } from "@/lib/store";
 import { requestWorkflowSync } from "@/lib/workflowSyncBus";
-import { VIDEO_MODELS } from "@/lib/modelConfig";
+import { useComfyProfiles } from "@/lib/useComfyProfiles";
 import CuttableEdge from "@/components/edges/CuttableEdge";
 import { topoSort, resolveInputs } from "@/lib/executor";
 import { NODE_SIZE, FALLBACK_SIZE, getLastNodeSettings, getDefaultNodeSize } from "@/lib/nodeTypes";
@@ -163,15 +163,16 @@ function nodeAcceptsPromptInput(node: Node<NodeData>, edges: Edge[]): boolean {
   if (node.type === "generateNode") return true;
 
   if (node.type === "videoGeneratorNode") {
-    const videoModelId = (node.data?.videoModel as string | undefined) ?? "kling-3.0";
-    const videoCfg = VIDEO_MODELS.find((m) => m.id === videoModelId);
-    return videoCfg?.handles.includes("prompt" as never) ?? false;
+    // Local ComfyUI video profiles always expose a prompt binding.
+    return true;
   }
 
   return false;
 }
 
 export default function WorkflowCanvas() {
+  const { videoModels: VIDEO_MODELS } = useComfyProfiles();
+
   const {
     nodes, edges,
     onNodesChange: _onNodesChange, onEdgesChange, onConnect,

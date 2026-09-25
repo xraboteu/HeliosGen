@@ -1,16 +1,19 @@
 import { NextRequest } from "next/server";
 import { jobStore, type JobResult } from "@/lib/jobStore";
 import { jobEvents } from "@/lib/jobEvents";
-import { resumeKieJob } from "@/lib/kieJobPoller";
+import {
+  resumeProviderJob,
+  resumeInFlightJobs,
+} from "@/lib/providers/runner";
 import * as guestDb from "@/lib/guest/db";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
   "Cache-Control": "no-cache",
-  "Connection": "keep-alive",
+  Connection: "keep-alive",
 };
 
-const TIMEOUT_MS = 12 * 60 * 1000; // 12 min hard cap
+const TIMEOUT_MS = 12 * 60 * 1000;
 
 function immediate(payload: JobResult): Response {
   return new Response(`data: ${JSON.stringify(payload)}\n\n`, { headers: SSE_HEADERS });
@@ -21,7 +24,11 @@ function recoverJob(taskId: string): JobResult | null {
   if (gen?.status === "done") {
     return gen.video_url
       ? { status: "done", videoUrl: gen.video_url }
-      : { status: "done", imageUrl: gen.image_url ?? undefined, imageUrls: gen.image_urls ?? undefined };
+      : {
+          status: "done",
+          imageUrl: gen.image_url ?? undefined,
+          imageUrls: gen.image_urls ?? undefined,
+        };
   }
   if (gen?.status === "error") {
     return { status: "error", error: gen.error_msg ?? "Generation failed" };
@@ -30,12 +37,14 @@ function recoverJob(taskId: string): JobResult | null {
 }
 
 export async function GET(req: NextRequest) {
+  resumeInFlightJobs();
+
   const taskId = req.nextUrl.searchParams.get("taskId");
   if (!taskId) return new Response("taskId required", { status: 400 });
 
-  // Already settled in jobStore — respond immediately, no stream needed
   const existing = jobStore.get(taskId);
-  if (existing && existing.status !== "pending") {
+  // Only emit terminal events on this stream (video EventSource closes on first event).
+  if (existing && existing.status !== "pending" && existing.status !== "running") {
     return immediate(existing);
   }
 
@@ -45,16 +54,12 @@ export async function GET(req: NextRequest) {
       jobStore.set(taskId, recovered);
       return immediate(recovered);
     }
-    // No DB record either — truly not found
     return immediate({ status: "error", error: "Job not found" });
   }
 
-  // Restart the kie.ai poller if a server restart lost it.
-  if (!taskId.startsWith("azure-")) {
-    resumeKieJob(taskId, existing.type === "video" ? "video" : "image");
-  }
+  const kind = existing.type === "video" ? "video" : "image";
+  resumeProviderJob(taskId, kind);
 
-  // Job is pending — open an SSE stream and wait for the poller/callback to fire
   const stream = new ReadableStream({
     start(controller) {
       const enc = new TextEncoder();
@@ -70,16 +75,16 @@ export async function GET(req: NextRequest) {
 
       const send = (payload: JobResult) => {
         if (closed) return;
+        // Never emit running — clients that close on first event would miss the result.
+        if (payload.status === "pending" || payload.status === "running") return;
         controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`));
         close();
       };
 
-      // Keepalive comment every 25 s (proxies drop idle SSE connections)
       const heartbeat = setInterval(() => {
         if (!closed) controller.enqueue(enc.encode(": ping\n\n"));
       }, 25_000);
 
-      // Hard cap — emit error if callback never arrives
       const timeout = setTimeout(() => {
         send({ status: "error", error: "Generation timed out" });
       }, TIMEOUT_MS);

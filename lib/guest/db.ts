@@ -25,6 +25,24 @@ interface Generation {
   image_urls?: string[];
   video_url?: string;
   error_msg?: string;
+  provider?: string;
+  external_id?: string;
+  task_kind?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderJobRow {
+  id: string;
+  provider: string;
+  capability: string;
+  task_kind: string | null;
+  external_id: string | null;
+  status: string;
+  error_code: string | null;
+  error_message: string | null;
+  request_json: string | null;
+  result_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -81,6 +99,9 @@ function rowToGeneration(r: GenRow): Generation {
     image_urls: parseArr(r.image_urls),
     video_url: (r.video_url as string) ?? undefined,
     error_msg: (r.error_msg as string) ?? undefined,
+    provider: (r.provider as string) ?? undefined,
+    external_id: (r.external_id as string) ?? undefined,
+    task_kind: (r.task_kind as string) ?? undefined,
     created_at: r.created_at as string,
     updated_at: r.updated_at as string,
   };
@@ -99,8 +120,9 @@ export function insertGeneration(data: Omit<Generation, "id" | "created_at" | "u
       INSERT INTO generations
         (id, user_id, task_id, generation_type, status, prompt, model, aspect_ratio,
          quality, azure_resolution, duration, kling_mode, sound, reference_image_urls,
-         image_url, image_urls, video_url, error_msg, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         image_url, image_urls, video_url, error_msg, provider, external_id, task_kind,
+         created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(task_id) DO NOTHING
     `)
     .run(
@@ -110,7 +132,9 @@ export function insertGeneration(data: Omit<Generation, "id" | "created_at" | "u
       data.sound ? 1 : 0,
       data.reference_image_urls ? JSON.stringify(data.reference_image_urls) : null,
       data.image_url ?? null, data.image_urls ? JSON.stringify(data.image_urls) : null,
-      data.video_url ?? null, data.error_msg ?? null, ts, ts,
+      data.video_url ?? null, data.error_msg ?? null,
+      data.provider ?? null, data.external_id ?? null, data.task_kind ?? null,
+      ts, ts,
     );
 }
 
@@ -221,35 +245,104 @@ function deleteSetting(key: string): void {
   db().prepare("DELETE FROM settings WHERE key = ?").run(key);
 }
 
-export function getKieApiToken(): string | null {
-  const dbToken = getSetting("kie_api_token");
-  if (dbToken) return dbToken;
-  const envToken = process.env.KIE_API_KEY ?? "";
-  if (!envToken || envToken === "your_kie_api_key_here") return null;
-  return envToken;
+/** Generic settings accessors used by local providers (URLs, workflows, models). */
+export function getAppSetting(key: string): string | null {
+  return getSetting(key);
+}
+export function setAppSetting(key: string, value: string): void {
+  setSetting(key, value);
+}
+export function deleteAppSetting(key: string): void {
+  deleteSetting(key);
 }
 
-export function setKieApiToken(token: string): void {
-  setSetting("kie_api_token", token);
+// ── Provider jobs ──────────────────────────────────────────────────────────
+
+function rowToProviderJob(r: Record<string, unknown>): ProviderJobRow {
+  return {
+    id: r.id as string,
+    provider: r.provider as string,
+    capability: r.capability as string,
+    task_kind: (r.task_kind as string) ?? null,
+    external_id: (r.external_id as string) ?? null,
+    status: r.status as string,
+    error_code: (r.error_code as string) ?? null,
+    error_message: (r.error_message as string) ?? null,
+    request_json: (r.request_json as string) ?? null,
+    result_json: (r.result_json as string) ?? null,
+    created_at: r.created_at as string,
+    updated_at: r.updated_at as string,
+  };
 }
 
-export function deleteKieApiToken(): void {
-  deleteSetting("kie_api_token");
+export function insertProviderJob(data: {
+  id: string;
+  provider: string;
+  capability: string;
+  task_kind?: string | null;
+  external_id?: string | null;
+  status: string;
+  error_code?: string | null;
+  error_message?: string | null;
+  request_json?: string | null;
+  result_json?: string | null;
+}): void {
+  const ts = now();
+  db()
+    .prepare(`
+      INSERT INTO provider_jobs
+        (id, provider, capability, task_kind, external_id, status,
+         error_code, error_message, request_json, result_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      data.id, data.provider, data.capability, data.task_kind ?? null,
+      data.external_id ?? null, data.status,
+      data.error_code ?? null, data.error_message ?? null,
+      data.request_json ?? null, data.result_json ?? null, ts, ts,
+    );
 }
 
-export function getAzureApiKey(): string | null {
-  const dbKey = getSetting("azure_api_key");
-  if (dbKey) return dbKey;
-  const envKey = process.env.AZURE_API_KEY ?? "";
-  return envKey || null;
+export function updateProviderJob(
+  id: string,
+  updates: Partial<
+    Pick<
+      ProviderJobRow,
+      | "external_id"
+      | "status"
+      | "error_code"
+      | "error_message"
+      | "request_json"
+      | "result_json"
+    >
+  >,
+): void {
+  const sets: string[] = ["updated_at = ?"];
+  const vals: unknown[] = [now()];
+  if ("external_id" in updates) { sets.push("external_id = ?"); vals.push(updates.external_id ?? null); }
+  if ("status" in updates) { sets.push("status = ?"); vals.push(updates.status ?? null); }
+  if ("error_code" in updates) { sets.push("error_code = ?"); vals.push(updates.error_code ?? null); }
+  if ("error_message" in updates) { sets.push("error_message = ?"); vals.push(updates.error_message ?? null); }
+  if ("request_json" in updates) { sets.push("request_json = ?"); vals.push(updates.request_json ?? null); }
+  if ("result_json" in updates) { sets.push("result_json = ?"); vals.push(updates.result_json ?? null); }
+  vals.push(id);
+  db().prepare(`UPDATE provider_jobs SET ${sets.join(", ")} WHERE id = ?`).run(...(vals as never[]));
 }
 
-export function setAzureApiKey(key: string): void {
-  setSetting("azure_api_key", key);
+export function getProviderJob(id: string): ProviderJobRow | null {
+  const r = db().prepare("SELECT * FROM provider_jobs WHERE id = ?").get(id) as
+    | Record<string, unknown>
+    | undefined;
+  return r ? rowToProviderJob(r) : null;
 }
 
-export function deleteAzureApiKey(): void {
-  deleteSetting("azure_api_key");
+export function listInFlightProviderJobs(): ProviderJobRow[] {
+  const rows = db()
+    .prepare(
+      `SELECT * FROM provider_jobs WHERE status IN ('pending', 'running') ORDER BY created_at ASC`,
+    )
+    .all() as Record<string, unknown>[];
+  return rows.map(rowToProviderJob);
 }
 
 // ── Folders ────────────────────────────────────────────────────────────────
